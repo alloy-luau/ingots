@@ -1,0 +1,35 @@
+name = "enamel"
+api = 1
+description = "Utility classes on .alx elements: `ClassName=\"flex gap-2 bg-red-500 rounded-lg\"` becomes Roblox properties and layout children."
+binary = "../../target/release/enamel"
+run = "first"
+hooks = ["transform", "lint", "hover", "complete", "colors"]
+
+[options]
+# The font families `font-sans`, `font-serif`, and `font-mono` name.
+font_sans = "rbxasset://fonts/families/GothamSSm.json"
+font_serif = "rbxasset://fonts/families/Merriweather.json"
+font_mono = "rbxasset://fonts/families/RobotoMono.json"
+# The name of the helper the transform writes for `hover:` and the other
+# state variants. Change it when it collides with a name of yours.
+helper = "__enamel"
+
+[lints.unknown_class]
+default = "warn"
+summary = "a class Enamel does not know"
+detail = "The class matches no utility, so it sets nothing. A typo in a name, or a Tailwind utility with no Roblox property behind it."
+
+[lints.no_effect]
+default = "warn"
+summary = "a utility with no effect on a Roblox instance"
+detail = "Margins, shadows, cursors, and a few others have no property to set on a GuiObject. The class parses and does nothing; `gap-*` on the parent replaces a margin."
+
+[lints.not_an_element]
+default = "deny"
+summary = "`ClassName` on a component or an unknown tag"
+detail = "Enamel rewrites `ClassName` on a Roblox GUI element, `Frame`, `TextLabel`, and the rest. On a component the classes would pass as a prop and set nothing; put them on the element the component renders."
+
+[lints.wrong_element]
+default = "warn"
+summary = "a utility the element's class has no property for"
+detail = "A text utility on a Frame, or an image utility on a TextLabel: the property is not on that class, so the class sets nothing."

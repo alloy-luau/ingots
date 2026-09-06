@@ -1,0 +1,16 @@
+[package]
+name = "enamel"
+version = "0.1.0"
+description = "Utility classes for Alloy markup: Tailwind's names, Roblox properties"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+alloy-ingot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
