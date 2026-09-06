@@ -47,6 +47,45 @@ In the editor, hover on a class shows what it sets, completion lists
 every utility with a swatch beside each color, and a color class shows
 its swatch in the text.
 
+## Fonts
+
+Every family Roblox ships is a class, by the name `Enum.Font` gives it:
+`font-gotham`, `font-source-sans`, `font-roboto-mono`, `font-arcade`,
+`font-builder-sans`, and the rest, with the weighted items as aliases,
+`font-gotham-bold`. `font-bold`, `font-medium`, and `italic` combine
+with any of them into one `FontFace`.
+
+## The theme file
+
+`enamel.luau` at the project root holds the colors, fonts, and classes
+of the project, written as Luau with the Roblox API. Enamel never runs
+the file: each entry is the text of an expression, copied into the
+generated markup the way a macro copies its body, and the statements
+before the `return` are copied once into any `.alx` file that uses an
+entry, so a local defined there is in scope.
+
+```luau
+local purple = Color3.fromRGB(138, 61, 245)
+
+return {
+    colors = { brand = purple, accent = "#ff8a00" },
+    fonts = { title = Font.new("rbxasset://fonts/families/Montserrat.json", Enum.FontWeight.Bold) },
+    classes = {
+        card = "bg-slate-900/80 rounded-xl p-4",
+        glow = { BackgroundColor3 = purple, ZIndex = 2 },
+    },
+}
+```
+
+A color name works wherever a palette name does, `bg-brand`,
+`text-brand/50`, `from-accent`; a font name as `font-title`, and
+`font-bold` beside it keeps the family and sets the weight; a class
+name expands to its list, or sets its properties as written. The editor
+reads the file the way it reads any Luau, with the Roblox API, and
+completes the entries in `ClassName` strings; a color it can read, a
+`Color3` call or a hex string, gets its swatch. A structural problem in
+the file is the `theme` lint, on the file itself.
+
 ## Options
 
 ```toml

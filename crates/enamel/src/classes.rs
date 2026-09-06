@@ -5,7 +5,9 @@
 
 use std::collections::BTreeMap;
 
+use crate::fonts;
 use crate::palette;
+use crate::theme::{self, ClassDef, Theme};
 
 /// The state a variant binds a utility to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -132,6 +134,8 @@ impl Element {
 /// What a property needs of the element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Needs {
+    /// A theme property: the author knows the element.
+    Any,
     Gui,
     Text,
     TextBox,
@@ -144,6 +148,7 @@ pub enum Needs {
 impl Needs {
     pub fn met_by(self, e: Element) -> bool {
         match self {
+            Self::Any => true,
             Self::Gui => e.is_gui_object(),
             Self::Text => e.has_text(),
             Self::TextBox => e == Element::TextBox,
@@ -156,6 +161,7 @@ impl Needs {
 
     pub fn word(self) -> &'static str {
         match self {
+            Self::Any => "any element",
             Self::Gui => "a GuiObject",
             Self::Text => "a text element",
             Self::TextBox => "a TextBox",
@@ -195,7 +201,7 @@ impl Dim {
 pub enum Piece {
     /// A property of the element itself, as Luau text.
     Prop {
-        name: &'static str,
+        name: String,
         value: String,
         needs: Needs,
     },
@@ -226,7 +232,8 @@ pub enum Piece {
     Padding(&'static str, f64),
     Corner(Dim),
     Stroke(&'static str, String),
-    GradientStop(&'static str, (u8, u8, u8)),
+    /// A gradient stop, as the Luau expression of its color.
+    GradientStop(&'static str, String),
     GradientRotation(f64),
     SizeConstraint(&'static str, &'static str, f64),
     Aspect(f64),
@@ -234,6 +241,8 @@ pub enum Piece {
     FlexItem(&'static str, String),
     /// `group`: the element marks itself for `group-hover:` below it.
     Group,
+    /// A value of the theme file: the file needs the prelude.
+    Theme,
     /// A utility Roblox has no property for.
     NoEffect(&'static str),
 }
@@ -247,9 +256,9 @@ pub struct Utility {
     pub color: Option<((u8, u8, u8), f64)>,
 }
 
-fn prop(name: &'static str, value: impl Into<String>, needs: Needs) -> Piece {
+fn prop(name: &str, value: impl Into<String>, needs: Needs) -> Piece {
     Piece::Prop {
-        name,
+        name: name.to_string(),
         value: value.into(),
         needs,
     }
@@ -343,9 +352,18 @@ fn length(text: &str) -> Option<f64> {
     text.parse().ok()
 }
 
-/// A color word: a palette name, `white`, `[#ff0000]`, or
-/// `[rgb(1,2,3)]`, with an optional `/50` alpha.
-pub fn color(word: &str) -> Option<((u8, u8, u8), f64)> {
+/// A color as the generated code writes it, with the color the reader
+/// sees when it is one the ingot can read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColorValue {
+    pub expr: String,
+    pub rgb: Option<(u8, u8, u8)>,
+    pub alpha: f64,
+}
+
+/// A color word: a palette name, `white`, a name from the theme,
+/// `[#ff0000]`, or `[rgb(1,2,3)]`, with an optional `/50` alpha.
+pub fn color(word: &str, theme: &Theme) -> Option<ColorValue> {
     let (name, alpha) = match word.rsplit_once('/') {
         Some((n, a)) if !n.starts_with('[') || n.ends_with(']') => {
             let a: f64 = a.parse().ok()?;
@@ -357,13 +375,42 @@ pub fn color(word: &str) -> Option<((u8, u8, u8), f64)> {
     };
 
     if let Some(inner) = arbitrary(name) {
-        return hex(inner).or_else(|| rgb(inner)).map(|c| (c, alpha));
+        let c = hex(inner).or_else(|| rgb(inner))?;
+
+        return Some(ColorValue {
+            expr: color3(c),
+            rgb: Some(c),
+            alpha,
+        });
     }
 
-    palette::lookup(name).map(|c| (c, alpha))
+    if let Some(entry) = theme.colors.get(name) {
+        return Some(ColorValue {
+            expr: entry.expr.clone(),
+            rgb: theme::color_of(&entry.expr),
+            alpha,
+        });
+    }
+
+    let c = palette::lookup(name)?;
+
+    Some(ColorValue {
+        expr: color3(c),
+        rgb: Some(c),
+        alpha,
+    })
 }
 
-fn hex(text: &str) -> Option<(u8, u8, u8)> {
+/// The hex of a color value for a summary, or the expression.
+fn color_words(c: &ColorValue) -> String {
+    match c.rgb {
+        Some(rgb) => palette::hex(rgb),
+
+        None => format!("`{}`", c.expr),
+    }
+}
+
+pub fn hex(text: &str) -> Option<(u8, u8, u8)> {
     let h = text.strip_prefix('#')?;
     let h: String = if h.len() == 3 {
         h.chars().flat_map(|c| [c, c]).collect()
@@ -503,10 +550,63 @@ impl Default for Fonts {
     }
 }
 
+/// What the utilities read: the font options and the project's theme.
+#[derive(Debug, Clone, Default)]
+pub struct Context {
+    pub fonts: Fonts,
+    pub theme: Theme,
+}
+
 /// The utility a base name (the token without variants and sign) names.
+pub fn parse(class: &Class, ctx: &Context) -> Option<Utility> {
+    parse_depth(class, ctx, 0)
+}
+
 #[allow(clippy::too_many_lines)]
-pub fn parse(class: &Class, fonts: &Fonts) -> Option<Utility> {
+fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
+    let fonts = &ctx.fonts;
+    let theme = &ctx.theme;
     let base = class.base.as_str();
+
+    // A class of the theme: a list of utilities, or properties as written.
+    if let Some((def, _)) = theme.classes.get(base)
+        && depth < 8
+    {
+        return Some(match def {
+            ClassDef::Classes(list) => {
+                let mut pieces = Vec::new();
+
+                for word in list.split_whitespace() {
+                    if let Some(u) = parse_depth(&Class::parse(word), ctx, depth + 1) {
+                        pieces.extend(u.pieces);
+                    }
+                }
+
+                pieces.push(Piece::Theme);
+
+                Utility {
+                    pieces,
+                    summary: format!("the theme's `{base}`: {list}"),
+                    color: None,
+                }
+            }
+
+            ClassDef::Props(props) => {
+                let mut pieces: Vec<Piece> = props
+                    .iter()
+                    .map(|(k, v)| prop(k, v.clone(), Needs::Any))
+                    .collect();
+                pieces.push(Piece::Theme);
+
+                Utility {
+                    pieces,
+                    summary: format!("the theme's `{base}`"),
+                    color: None,
+                }
+            }
+        });
+    }
+
     let neg = if class.negative { -1.0 } else { 1.0 };
     let no = |what: &'static str| Some(utility(vec![Piece::NoEffect(what)], what));
 
@@ -774,43 +874,23 @@ pub fn parse(class: &Class, fonts: &Fonts) -> Option<Utility> {
             "the text is rich text",
         )),
         "italic" => Some(utility(
-            vec![Piece::Prop {
-                name: "__italic",
-                value: "true".into(),
-                needs: Needs::Text,
-            }],
+            vec![prop("__italic", "true", Needs::Text)],
             "italic text",
         )),
         "not-italic" => Some(utility(
-            vec![Piece::Prop {
-                name: "__italic",
-                value: "false".into(),
-                needs: Needs::Text,
-            }],
+            vec![prop("__italic", "false", Needs::Text)],
             "upright text",
         )),
         "font-sans" => Some(utility(
-            vec![Piece::Prop {
-                name: "__family",
-                value: fonts.sans.clone(),
-                needs: Needs::Text,
-            }],
+            vec![prop("__family", fonts.sans.clone(), Needs::Text)],
             "the sans-serif family",
         )),
         "font-serif" => Some(utility(
-            vec![Piece::Prop {
-                name: "__family",
-                value: fonts.serif.clone(),
-                needs: Needs::Text,
-            }],
+            vec![prop("__family", fonts.serif.clone(), Needs::Text)],
             "the serif family",
         )),
         "font-mono" => Some(utility(
-            vec![Piece::Prop {
-                name: "__family",
-                value: fonts.mono.clone(),
-                needs: Needs::Text,
-            }],
+            vec![prop("__family", fonts.mono.clone(), Needs::Text)],
             "the monospace family",
         )),
         "bg-transparent" => Some(utility(
@@ -1191,17 +1271,17 @@ pub fn parse(class: &Class, fonts: &Fonts) -> Option<Utility> {
                 ));
             }
 
-            let (c, alpha) = color(rest)?;
-            let mut pieces = vec![Piece::Stroke("Color", color3(c))];
+            let c = color(rest, theme)?;
+            let mut pieces = vec![Piece::Stroke("Color", c.expr.clone())];
 
-            if alpha < 1.0 {
-                pieces.push(Piece::Stroke("Transparency", num(1.0 - alpha)));
+            if c.alpha < 1.0 {
+                pieces.push(Piece::Stroke("Transparency", num(1.0 - c.alpha)));
             }
 
             Some(Utility {
                 pieces,
-                summary: format!("a UIStroke colored {}", palette::hex(c)),
-                color: Some((c, alpha)),
+                summary: format!("a UIStroke colored {}", color_words(&c)),
+                color: c.rgb.map(|rgb| (rgb, c.alpha)),
             })
         }
         "bg" => {
@@ -1214,35 +1294,37 @@ pub fn parse(class: &Class, fonts: &Fonts) -> Option<Utility> {
                 ));
             }
 
-            let (c, alpha) = color(rest)?;
-            let mut pieces = vec![prop("BackgroundColor3", color3(c), Needs::Gui)];
+            let c = color(rest, theme)?;
+            let mut pieces = vec![prop("BackgroundColor3", c.expr.clone(), Needs::Gui)];
 
-            if alpha < 1.0 {
-                pieces.push(prop("BackgroundTransparency", num(1.0 - alpha), Needs::Gui));
+            if c.alpha < 1.0 {
+                pieces.push(prop(
+                    "BackgroundTransparency",
+                    num(1.0 - c.alpha),
+                    Needs::Gui,
+                ));
             }
 
             Some(Utility {
                 pieces,
-                summary: format!("background {}", palette::hex(c)),
-                color: Some((c, alpha)),
+                summary: format!("background {}", color_words(&c)),
+                color: c.rgb.map(|rgb| (rgb, c.alpha)),
             })
         }
         "from" | "via" | "to" => {
-            let (c, _) = color(rest)?;
+            let c = color(rest, theme)?;
+            let stop = if head == "from" {
+                "from"
+            } else if head == "via" {
+                "via"
+            } else {
+                "to"
+            };
 
             Some(Utility {
-                pieces: vec![Piece::GradientStop(
-                    if head == "from" {
-                        "from"
-                    } else if head == "via" {
-                        "via"
-                    } else {
-                        "to"
-                    },
-                    c,
-                )],
-                summary: format!("gradient stop {}", palette::hex(c)),
-                color: Some((c, 1.0)),
+                pieces: vec![Piece::GradientStop(stop, c.expr.clone())],
+                summary: format!("gradient stop {}", color_words(&c)),
+                color: c.rgb.map(|rgb| (rgb, 1.0)),
             })
         }
         "text" => {
@@ -1253,53 +1335,72 @@ pub fn parse(class: &Class, fonts: &Fonts) -> Option<Utility> {
                 ));
             }
 
-            let (c, alpha) = color(rest)?;
-            let mut pieces = vec![prop("TextColor3", color3(c), Needs::Text)];
+            let c = color(rest, theme)?;
+            let mut pieces = vec![prop("TextColor3", c.expr.clone(), Needs::Text)];
 
-            if alpha < 1.0 {
-                pieces.push(prop("TextTransparency", num(1.0 - alpha), Needs::Text));
+            if c.alpha < 1.0 {
+                pieces.push(prop("TextTransparency", num(1.0 - c.alpha), Needs::Text));
             }
 
             Some(Utility {
                 pieces,
-                summary: format!("text {}", palette::hex(c)),
-                color: Some((c, alpha)),
+                summary: format!("text {}", color_words(&c)),
+                color: c.rgb.map(|rgb| (rgb, c.alpha)),
             })
         }
         "placeholder" => {
-            let (c, _) = color(rest)?;
+            let c = color(rest, theme)?;
 
             Some(Utility {
-                pieces: vec![prop("PlaceholderColor3", color3(c), Needs::TextBox)],
-                summary: format!("placeholder {}", palette::hex(c)),
-                color: Some((c, 1.0)),
+                pieces: vec![prop("PlaceholderColor3", c.expr.clone(), Needs::TextBox)],
+                summary: format!("placeholder {}", color_words(&c)),
+                color: c.rgb.map(|rgb| (rgb, 1.0)),
             })
         }
         "image" => {
-            let (c, alpha) = color(rest)?;
-            let mut pieces = vec![prop("ImageColor3", color3(c), Needs::Image)];
+            let c = color(rest, theme)?;
+            let mut pieces = vec![prop("ImageColor3", c.expr.clone(), Needs::Image)];
 
-            if alpha < 1.0 {
-                pieces.push(prop("ImageTransparency", num(1.0 - alpha), Needs::Image));
+            if c.alpha < 1.0 {
+                pieces.push(prop("ImageTransparency", num(1.0 - c.alpha), Needs::Image));
             }
 
             Some(Utility {
                 pieces,
-                summary: format!("image tint {}", palette::hex(c)),
-                color: Some((c, alpha)),
+                summary: format!("image tint {}", color_words(&c)),
+                color: c.rgb.map(|rgb| (rgb, c.alpha)),
             })
         }
         "font" => {
-            let w = weight(rest)?;
+            if let Some(w) = weight(rest) {
+                return Some(utility(
+                    vec![prop("__weight", w, Needs::Text)],
+                    format!("font weight {w}"),
+                ));
+            }
 
-            Some(utility(
-                vec![Piece::Prop {
-                    name: "__weight",
-                    value: w.into(),
-                    needs: Needs::Text,
-                }],
-                format!("font weight {w}"),
-            ))
+            if let Some(entry) = theme.fonts.get(rest) {
+                return Some(utility(
+                    vec![
+                        prop("__face", entry.expr.clone(), Needs::Text),
+                        Piece::Theme,
+                    ],
+                    format!("the theme's font `{rest}`"),
+                ));
+            }
+
+            let f = fonts::lookup(rest)?;
+            let mut pieces = vec![prop("__family", fonts::family_path(f.family), Needs::Text)];
+
+            if f.weight != "Regular" {
+                pieces.push(prop("__weight", f.weight, Needs::Text));
+            }
+
+            if f.italic {
+                pieces.push(prop("__italic", "true", Needs::Text));
+            }
+
+            Some(utility(pieces, format!("the {} family", f.family)))
         }
         "leading" => {
             let n = leading(rest)?;
@@ -1354,7 +1455,7 @@ pub enum Problem {
     Unknown,
     UnknownVariant(String),
     NoEffect(&'static str),
-    WrongElement(&'static str, Needs),
+    WrongElement(String, Needs),
     /// A child or a marker under a variant: only a property can change
     /// with a state.
     VariantNeedsProperty,
@@ -1368,13 +1469,17 @@ pub struct Resolved {
     /// The properties of each state, `hover` and the rest.
     pub states: BTreeMap<&'static str, Vec<(String, String)>>,
     pub group: bool,
+    /// Whether a value of the theme file is in use, so the file needs
+    /// the theme's prelude.
+    pub uses_theme: bool,
     /// Problems by class index.
     pub problems: Vec<(usize, Problem)>,
 }
 
 /// Combines the classes of one element.
 #[allow(clippy::too_many_lines)]
-pub fn resolve(element: Element, classes: &[Class], fonts: &Fonts) -> Resolved {
+pub fn resolve(element: Element, classes: &[Class], ctx: &Context) -> Resolved {
+    let fonts = &ctx.fonts;
     let mut out = Resolved::default();
     let mut size = (None::<Dim>, None::<Dim>);
     let mut auto = (false, false);
@@ -1387,7 +1492,7 @@ pub fn resolve(element: Element, classes: &[Class], fonts: &Fonts) -> Resolved {
     let mut padding: BTreeMap<&'static str, f64> = BTreeMap::new();
     let mut corner = None;
     let mut stroke: BTreeMap<&'static str, String> = BTreeMap::new();
-    let mut stops: Vec<(&'static str, (u8, u8, u8))> = Vec::new();
+    let mut stops: Vec<(&'static str, String)> = Vec::new();
     let mut rotation = None;
     let mut constraint: BTreeMap<(&'static str, &'static str), f64> = BTreeMap::new();
     let mut aspect = None;
@@ -1403,7 +1508,7 @@ pub fn resolve(element: Element, classes: &[Class], fonts: &Fonts) -> Resolved {
             continue;
         }
 
-        let Some(u) = parse(class, fonts) else {
+        let Some(u) = parse(class, ctx) else {
             out.problems.push((i, Problem::Unknown));
 
             continue;
@@ -1425,14 +1530,13 @@ pub fn resolve(element: Element, classes: &[Class], fonts: &Fonts) -> Resolved {
                                 .or_default()
                                 .insert(field_key(field), value);
                         } else {
-                            out.states
-                                .entry(state)
-                                .or_default()
-                                .push((name.to_string(), value));
+                            out.states.entry(state).or_default().push((name, value));
                         }
                     }
 
                     Piece::NoEffect(what) => out.problems.push((i, Problem::NoEffect(what))),
+
+                    Piece::Theme => out.uses_theme = true,
 
                     _ => out.problems.push((i, Problem::VariantNeedsProperty)),
                 }
@@ -1451,7 +1555,7 @@ pub fn resolve(element: Element, classes: &[Class], fonts: &Fonts) -> Resolved {
                     if let Some(field) = name.strip_prefix("__") {
                         font.insert(field_key(field), value);
                     } else {
-                        out.props.push((name.to_string(), value));
+                        out.props.push((name, value));
                     }
                 }
 
@@ -1495,20 +1599,22 @@ pub fn resolve(element: Element, classes: &[Class], fonts: &Fonts) -> Resolved {
                     flex.insert(k, v);
                 }
                 Piece::Group => out.group = true,
+                Piece::Theme => out.uses_theme = true,
                 Piece::NoEffect(what) => out.problems.push((i, Problem::NoEffect(what))),
             }
         }
 
         // The pieces above skip a property the element lacks; a class
         // that set nothing at all on this element says so.
-        if let Some(u) = parse(class, fonts)
+        if let Some(u) = parse(class, ctx)
             && !u.pieces.is_empty()
             && u.pieces
                 .iter()
                 .all(|p| matches!(p, Piece::Prop { needs, .. } if !needs.met_by(element)))
             && let Some(Piece::Prop { name, needs, .. }) = u.pieces.first()
         {
-            out.problems.push((i, Problem::WrongElement(name, *needs)));
+            out.problems
+                .push((i, Problem::WrongElement(name.clone(), *needs)));
         }
     }
 
@@ -1781,20 +1887,25 @@ pub fn resolve(element: Element, classes: &[Class], fonts: &Fonts) -> Resolved {
     }
 
     if gui && (!stops.is_empty() || rotation.is_some()) {
-        let from = stops.iter().find(|(k, _)| *k == "from").map(|(_, c)| *c);
-        let via = stops.iter().find(|(k, _)| *k == "via").map(|(_, c)| *c);
-        let to = stops.iter().find(|(k, _)| *k == "to").map(|(_, c)| *c);
-        let first = from.or(via).or(to).unwrap_or((255, 255, 255));
-        let last = to.or(via).or(from).unwrap_or((255, 255, 255));
+        let stop = |k: &str| stops.iter().find(|(s, _)| *s == k).map(|(_, c)| c.clone());
+        let (from, via, to) = (stop("from"), stop("via"), stop("to"));
+        let white = || color3((255, 255, 255));
+        let first = from
+            .clone()
+            .or_else(|| via.clone())
+            .or_else(|| to.clone())
+            .unwrap_or_else(white);
+        let last = to
+            .clone()
+            .or_else(|| via.clone())
+            .or_else(|| from.clone())
+            .unwrap_or_else(white);
         let keypoints = match via {
             Some(v) if from.is_some() || to.is_some() => format!(
-                "ColorSequence.new({{ ColorSequenceKeypoint.new(0, {}), ColorSequenceKeypoint.new(0.5, {}), ColorSequenceKeypoint.new(1, {}) }})",
-                color3(first),
-                color3(v),
-                color3(last)
+                "ColorSequence.new({{ ColorSequenceKeypoint.new(0, {first}), ColorSequenceKeypoint.new(0.5, {v}), ColorSequenceKeypoint.new(1, {last}) }})"
             ),
 
-            _ => format!("ColorSequence.new({}, {})", color3(first), color3(last)),
+            _ => format!("ColorSequence.new({first}, {last})"),
         };
         let mut props = vec![("Color".to_string(), keypoints)];
 
@@ -1877,20 +1988,41 @@ fn field_key(field: &str) -> &'static str {
     match field {
         "family" => "family",
         "weight" => "weight",
+        "face" => "face",
         _ => "italic",
     }
 }
 
+/// The `FontFace` of the font pieces. A theme font is a whole `Font`;
+/// a weight or a style class beside it takes the family from it.
 fn font_face(font: &BTreeMap<&'static str, String>, fonts: &Fonts) -> String {
+    let weight = font.get("weight").cloned();
+    let italic = font.get("italic").map(|i| i == "true");
+
+    if let Some(face) = font.get("face") {
+        if weight.is_none() && italic.is_none() {
+            return face.clone();
+        }
+
+        let w = weight.map_or_else(
+            || format!("({face}).Weight"),
+            |w| format!("Enum.FontWeight.{w}"),
+        );
+        let s = match italic {
+            Some(true) => "Enum.FontStyle.Italic".to_string(),
+            Some(false) => "Enum.FontStyle.Normal".to_string(),
+            None => format!("({face}).Style"),
+        };
+
+        return format!("Font.new(({face}).Family, {w}, {s})");
+    }
+
     let family = font
         .get("family")
         .cloned()
         .unwrap_or_else(|| fonts.sans.clone());
-    let weight = font
-        .get("weight")
-        .cloned()
-        .unwrap_or_else(|| "Regular".to_string());
-    let style = if font.get("italic").is_some_and(|i| i == "true") {
+    let weight = weight.unwrap_or_else(|| "Regular".to_string());
+    let style = if italic == Some(true) {
         "Italic"
     } else {
         "Normal"
@@ -1920,13 +2052,16 @@ fn flex_word(word: &str) -> &'static str {
     }
 }
 
+/// A color as three channels.
+pub type Rgb = (u8, u8, u8);
+
 /// One entry of the catalog: the name, a summary, and a color when the
 /// utility names one.
-pub type Entry = (String, String, Option<(u8, u8, u8)>);
+pub type Entry = (String, String, Option<Rgb>);
 
 /// Every utility name Enamel completes, with a summary and a color when
 /// the utility names one. Sizes and spacings list a few common steps.
-pub fn catalog(fonts: &Fonts) -> Vec<Entry> {
+pub fn catalog(ctx: &Context) -> Vec<Entry> {
     let mut names: Vec<String> = [
         "hidden",
         "visible",
@@ -2086,16 +2221,36 @@ pub fn catalog(fonts: &Fonts) -> Vec<Entry> {
         names.push(format!("grid-cols-{n}"));
     }
 
+    for f in fonts::FONTS {
+        names.push(format!("font-{}", f.class));
+    }
+
+    for name in ctx.theme.fonts.keys() {
+        names.push(format!("font-{name}"));
+    }
+
+    names.extend(ctx.theme.classes.keys().cloned());
+
     let mut out: Vec<Entry> = names
         .into_iter()
         .filter_map(|n| {
-            let u = parse(&Class::parse(&n), fonts)?;
+            let u = parse(&Class::parse(&n), ctx)?;
 
             Some((n, u.summary, None))
         })
         .collect();
+    let color_names: Vec<(String, Option<Rgb>)> = palette::PALETTE
+        .iter()
+        .map(|(n, rgb)| ((*n).to_string(), Some(*rgb)))
+        .chain(
+            ctx.theme
+                .colors
+                .iter()
+                .map(|(n, e)| (n.clone(), theme::color_of(&e.expr))),
+        )
+        .collect();
 
-    for (name, rgb) in palette::PALETTE {
+    for (name, rgb) in color_names {
         for head in [
             "bg",
             "text",
@@ -2107,10 +2262,10 @@ pub fn catalog(fonts: &Fonts) -> Vec<Entry> {
             "image",
         ] {
             let n = format!("{head}-{name}");
-            let Some(u) = parse(&Class::parse(&n), fonts) else {
+            let Some(u) = parse(&Class::parse(&n), ctx) else {
                 continue;
             };
-            out.push((n, u.summary, Some(*rgb)));
+            out.push((n, u.summary, rgb));
         }
     }
 
@@ -2124,7 +2279,45 @@ mod tests {
     fn resolved(tag: &str, classes: &str) -> Resolved {
         let cs: Vec<Class> = classes.split_whitespace().map(Class::parse).collect();
 
-        resolve(Element::parse(tag).unwrap(), &cs, &Fonts::default())
+        resolve(Element::parse(tag).unwrap(), &cs, &Context::default())
+    }
+
+    #[test]
+    fn theme_colors_fonts_and_classes_copy_their_expressions() {
+        let ctx = Context {
+            fonts: Fonts::default(),
+            theme: theme::parse(
+                "local purple = Color3.fromRGB(138, 61, 245)\nreturn {\n    colors = { brand = purple },\n    fonts = { title = Font.new(\"rbxasset://fonts/families/Montserrat.json\", Enum.FontWeight.Bold) },\n    classes = { card = \"bg-brand rounded-xl\", glow = { ZIndex = 2 } },\n}\n",
+            ),
+        };
+        let cs: Vec<Class> = "card glow font-title font-bold text-brand/50"
+            .split_whitespace()
+            .map(Class::parse)
+            .collect();
+        let r = resolve(Element::TextLabel, &cs, &ctx);
+        assert!(r.uses_theme);
+        assert!(
+            r.props
+                .contains(&("BackgroundColor3".into(), "purple".into()))
+        );
+        assert!(r.props.contains(&("ZIndex".into(), "2".into())));
+        assert!(r.props.contains(&("TextColor3".into(), "purple".into())));
+        assert!(r.props.contains(&("TextTransparency".into(), "0.5".into())));
+        assert!(r.props.iter().any(|(k, v)| k == "FontFace"
+            && v.starts_with("Font.new((Font.new(")
+            && v.contains("Enum.FontWeight.Bold")));
+        assert!(r.children.iter().any(|c| c.class == "UICorner"));
+        assert!(r.problems.is_empty(), "{:?}", r.problems);
+        let f = resolve(
+            Element::TextLabel,
+            &[Class::parse("font-gotham-bold")],
+            &ctx,
+        );
+        assert!(
+            f.props
+                .iter()
+                .any(|(_, v)| v.contains("GothamSSm") && v.contains("Bold"))
+        );
     }
 
     #[test]
@@ -2211,8 +2404,8 @@ mod tests {
         let r = resolved("Frame", "text-white");
         assert!(r.props.is_empty());
         assert!(matches!(
-            r.problems[0].1,
-            Problem::WrongElement("TextColor3", Needs::Text)
+            &r.problems[0].1,
+            Problem::WrongElement(n, Needs::Text) if n == "TextColor3"
         ));
     }
 

@@ -9,41 +9,53 @@
 
 mod classes;
 mod emit;
+mod fonts;
 mod markup;
 mod palette;
+mod theme;
 
 use alloy_ingot::{
     Color, ColorInfo, CompletionItem, Edit, File, Finding, Handler, Hover, ItemKind, Settings,
     serve,
 };
 
-use classes::{Class, Element, Fonts, Problem};
+use classes::{Class, Context, Element, Problem};
 
 struct Enamel {
-    fonts: Fonts,
+    ctx: Context,
     helper: String,
     catalog: Vec<classes::Entry>,
+    watched: theme::Watched,
 }
 
 impl Enamel {
     fn new() -> Self {
-        let fonts = Fonts::default();
-        let catalog = classes::catalog(&fonts);
+        let ctx = Context::default();
+        let catalog = classes::catalog(&ctx);
 
         Self {
-            fonts,
+            ctx,
             helper: "__enamel".into(),
             catalog,
+            watched: theme::Watched::default(),
+        }
+    }
+
+    /// Reads `enamel.luau` again when it changed, before any answer.
+    fn sync_theme(&mut self) {
+        if self.watched.refresh() {
+            self.ctx.theme = self.watched.theme.clone();
+            self.catalog = classes::catalog(&self.ctx);
         }
     }
 
     fn plans<'a>(&self, found: &'a [markup::Found]) -> Vec<emit::Plan<'a>> {
-        found.iter().map(|f| emit::plan(f, &self.fonts)).collect()
+        found.iter().map(|f| emit::plan(f, &self.ctx)).collect()
     }
 }
 
 /// The hover text of one class on an element.
-fn describe(class: &Class, element: Option<Element>, fonts: &Fonts) -> String {
+fn describe(class: &Class, element: Option<Element>, ctx: &Context) -> String {
     let mut out = format!("```alx\n{}\n```\n", class.token);
 
     if let Some(v) = &class.unknown_variant {
@@ -54,7 +66,7 @@ fn describe(class: &Class, element: Option<Element>, fonts: &Fonts) -> String {
         return out;
     }
 
-    let Some(u) = classes::parse(class, fonts) else {
+    let Some(u) = classes::parse(class, ctx) else {
         out.push_str("\nNot a utility Enamel knows.");
 
         return out;
@@ -63,7 +75,7 @@ fn describe(class: &Class, element: Option<Element>, fonts: &Fonts) -> String {
     out.push_str(&format!("\n{}.", capitalize(&u.summary)));
 
     if let Some(e) = element {
-        let r = classes::resolve(e, std::slice::from_ref(class), fonts);
+        let r = classes::resolve(e, std::slice::from_ref(class), ctx);
         let mut lines = Vec::new();
 
         for (k, v) in &r.props {
@@ -121,22 +133,27 @@ impl Handler for Enamel {
         };
 
         if let Some(v) = get("font_sans") {
-            self.fonts.sans = v;
+            self.ctx.fonts.sans = v;
         }
 
         if let Some(v) = get("font_serif") {
-            self.fonts.serif = v;
+            self.ctx.fonts.serif = v;
         }
 
         if let Some(v) = get("font_mono") {
-            self.fonts.mono = v;
+            self.ctx.fonts.mono = v;
         }
 
         if let Some(v) = get("helper") {
             self.helper = v;
         }
 
-        self.catalog = classes::catalog(&self.fonts);
+        if !settings.root.is_empty() {
+            self.watched = theme::Watched::at(std::path::Path::new(&settings.root));
+            self.ctx.theme = self.watched.theme.clone();
+        }
+
+        self.catalog = classes::catalog(&self.ctx);
 
         Ok(())
     }
@@ -144,6 +161,21 @@ impl Handler for Enamel {
     fn transform(&mut self, file: &File) -> Result<Vec<Edit>, String> {
         if file.kind != "alx" {
             return Ok(Vec::new());
+        }
+
+        self.sync_theme();
+
+        // A broken theme fails every markup file that has classes, with
+        // the theme's own line in the message: the file is outside the
+        // sources, so the lints never reach it on their own.
+        if let Some(problem) = self.ctx.theme.problems.first()
+            && file.source.contains("ClassName=")
+        {
+            let text = std::fs::read_to_string(self.watched.path().unwrap_or_default())
+                .unwrap_or_default();
+            let line = text[..problem.span.0.min(text.len())].matches('\n').count() + 1;
+
+            return Err(format!("{}:{line}: {}", theme::FILE_NAME, problem.message));
         }
 
         let found = markup::find(&file.source);
@@ -154,21 +186,49 @@ impl Handler for Enamel {
             edits.extend(plan.edits(&self.helper));
         }
 
+        // The theme's prelude and the state helper share one insert at
+        // the first code line, so the two never race for the byte.
+        let mut lead = String::new();
+
+        if plans.iter().any(emit::Plan::uses_theme) && !self.ctx.theme.prelude.is_empty() {
+            lead.push_str(&self.ctx.theme.prelude);
+            lead.push(' ');
+        }
+
         if plans.iter().any(emit::Plan::uses_helper) {
-            edits.push(Edit::insert(
-                emit::helper_at(&file.source),
-                emit::helper_text(&self.helper),
-            ));
+            lead.push_str(&emit::helper_text(&self.helper));
+        }
+
+        if !lead.is_empty() {
+            edits.push(Edit::insert(emit::helper_at(&file.source), lead));
         }
 
         Ok(edits)
     }
 
     fn lint(&mut self, file: &File) -> Result<Vec<Finding>, String> {
+        // The theme file itself: its structure.
+        if file.path == theme::FILE_NAME {
+            let t = theme::parse(&file.source);
+
+            return Ok(t
+                .problems
+                .iter()
+                .map(|p| {
+                    Finding::new(
+                        "theme",
+                        (p.span.0 as u32, p.span.1 as u32),
+                        p.message.clone(),
+                    )
+                })
+                .collect());
+        }
+
         if file.kind != "alx" {
             return Ok(Vec::new());
         }
 
+        self.sync_theme();
         let found = markup::find(&file.source);
         let mut out = Vec::new();
 
@@ -236,13 +296,14 @@ impl Handler for Enamel {
             return Ok(None);
         }
 
+        self.sync_theme();
         let found = markup::find(&file.source);
         let Some((f, k)) = markup::class_at(&found, offset as usize) else {
             return Ok(None);
         };
         let (token, (s, e)) = &f.classes[k];
         let class = Class::parse(token);
-        let text = describe(&class, Element::parse(&f.tag), &self.fonts);
+        let text = describe(&class, Element::parse(&f.tag), &self.ctx);
 
         Ok(Some(Hover::new(text).over((*s as u32, *e as u32))))
     }
@@ -257,6 +318,7 @@ impl Handler for Enamel {
             return Ok(Vec::new());
         }
 
+        self.sync_theme();
         let found = markup::find(&file.source);
         let Some((s, e)) = markup::string_at(&found, &file.source, offset as usize) else {
             return Ok(Vec::new());
@@ -296,13 +358,14 @@ impl Handler for Enamel {
             return Ok(Vec::new());
         }
 
+        self.sync_theme();
         let mut out = Vec::new();
 
         for f in markup::find(&file.source) {
             for (token, (s, e)) in &f.classes {
                 let class = Class::parse(token);
 
-                if let Some(u) = classes::parse(&class, &self.fonts)
+                if let Some(u) = classes::parse(&class, &self.ctx)
                     && let Some((rgb, alpha)) = u.color
                 {
                     out.push(ColorInfo::rgb((*s as u32, *e as u32), rgb, alpha));

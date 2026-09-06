@@ -4,7 +4,7 @@
 
 use alloy_ingot::Edit;
 
-use crate::classes::{self, Class, Element, Fonts, Resolved};
+use crate::classes::{self, Class, Context, Element, Resolved};
 use crate::markup::Found;
 
 /// The plan for one element: what the transform writes for it.
@@ -14,11 +14,11 @@ pub struct Plan<'a> {
     pub resolved: Resolved,
 }
 
-pub fn plan<'a>(found: &'a Found, fonts: &Fonts) -> Plan<'a> {
+pub fn plan<'a>(found: &'a Found, ctx: &Context) -> Plan<'a> {
     let classes: Vec<Class> = found.classes.iter().map(|(c, _)| Class::parse(c)).collect();
     let element = Element::parse(&found.tag);
     let resolved = element
-        .map(|e| classes::resolve(e, &classes, fonts))
+        .map(|e| classes::resolve(e, &classes, ctx))
         .unwrap_or_default();
 
     Plan {
@@ -31,6 +31,10 @@ pub fn plan<'a>(found: &'a Found, fonts: &Fonts) -> Plan<'a> {
 impl Plan<'_> {
     pub fn uses_helper(&self) -> bool {
         !self.resolved.states.is_empty() || self.resolved.group
+    }
+
+    pub fn uses_theme(&self) -> bool {
+        self.resolved.uses_theme
     }
 
     /// The attribute text that replaces `ClassName="..."`.
@@ -186,7 +190,7 @@ mod tests {
     fn a_self_closing_element_gains_children_and_properties() {
         let src = "local x = <Frame ClassName=\"flex gap-2 bg-red-500 rounded\" Name=\"a\" />\n";
         let found = markup::find(src);
-        let plan = plan(&found[0], &Fonts::default());
+        let plan = plan(&found[0], &Context::default());
         let out = apply(src, &plan.edits("__enamel"));
         assert_eq!(
             out,
@@ -198,7 +202,7 @@ mod tests {
     fn a_state_wraps_the_element_in_the_helper() {
         let src = "return (\n    <Frame>\n        <TextButton ClassName=\"bg-red-500 hover:bg-red-600\">Go</TextButton>\n    </Frame>\n)\n";
         let found = markup::find(src);
-        let plan = plan(&found[0], &Fonts::default());
+        let plan = plan(&found[0], &Context::default());
         let out = apply(src, &plan.edits("__enamel"));
         assert!(out.contains("{__enamel(<TextButton BackgroundColor3={Color3.fromRGB(239, 68, 68)}>Go</TextButton>, { hover = { BackgroundColor3 = Color3.fromRGB(220, 38, 38) } }, false)}"), "{out}");
         assert_eq!(out.matches('\n').count(), src.matches('\n').count());

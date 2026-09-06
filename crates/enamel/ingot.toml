@@ -26,6 +26,11 @@ default = "deny"
 summary = "`ClassName` on a component or an unknown tag"
 detail = "Enamel rewrites `ClassName` on a Roblox GUI element, `Frame`, `TextLabel`, and the rest. On a component the classes would pass as a prop and set nothing; put them on the element the component renders."
 
+[lints.theme]
+default = "deny"
+summary = "a problem in enamel.luau"
+detail = "The theme file returns a table with `colors`, `fonts`, and `classes` tables; each entry is a Luau expression Enamel copies into the generated code. Another table, or an entry that is neither a class string nor a property table, is a problem here."
+
 [lints.wrong_element]
 default = "warn"
 summary = "a utility the element's class has no property for"
