@@ -57,14 +57,14 @@ with any of them into one `FontFace`.
 
 ## The theme file
 
-`enamel.luau` at the project root holds the colors, fonts, and classes
-of the project, written as Luau with the Roblox API. Enamel never runs
+`enamel.aly` at the project root holds the colors, fonts, and classes
+of the project, written as Alloy with the Roblox API. Enamel never runs
 the file: each entry is the text of an expression, copied into the
 generated markup the way a macro copies its body, and the statements
 before the `return` are copied once into any `.alx` file that uses an
 entry, so a local defined there is in scope.
 
-```luau
+```alloy
 local purple = Color3.fromRGB(138, 61, 245)
 
 return {
@@ -81,7 +81,7 @@ A color name works wherever a palette name does, `bg-brand`,
 `text-brand/50`, `from-accent`; a font name as `font-title`, and
 `font-bold` beside it keeps the family and sets the weight; a class
 name expands to its list, or sets its properties as written. The editor
-reads the file the way it reads any Luau, with the Roblox API, and
+reads the file the way it reads any Alloy, with the Roblox API, and
 completes the entries in `ClassName` strings; a color it can read, a
 `Color3` call or a hex string, gets its swatch. A structural problem in
 the file is the `theme` lint, on the file itself.

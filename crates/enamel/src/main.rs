@@ -41,7 +41,7 @@ impl Enamel {
         }
     }
 
-    /// Reads `enamel.luau` again when it changed, before any answer.
+    /// Reads `enamel.aly` again when it changed, before any answer.
     fn sync_theme(&mut self) {
         if self.watched.refresh() {
             self.ctx.theme = self.watched.theme.clone();

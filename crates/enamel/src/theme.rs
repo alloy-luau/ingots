@@ -1,10 +1,10 @@
-//! The project's `enamel.luau`: fonts, colors, and classes of its own,
-//! written as Luau with the Roblox API. Enamel never runs it. Each entry
+//! The project's `enamel.aly`: fonts, colors, and classes of its own,
+//! written as Alloy with the Roblox API. Enamel never runs it. Each entry
 //! is the text of an expression, copied into the generated attribute
 //! the way a macro would; the statements before the `return` are the
 //! prelude, copied once into a file that uses one of the entries.
 //!
-//! ```luau
+//! ```alloy
 //! local purple = Color3.fromRGB(138, 61, 245)
 //!
 //! return {
@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// The file name, at the project root.
-pub const FILE_NAME: &str = "enamel.luau";
+pub const FILE_NAME: &str = "enamel.aly";
 
 /// One entry of a theme table: the expression text and its span in the
 /// file.
@@ -116,7 +116,7 @@ pub fn parse(text: &str) -> Theme {
     let Some(ret) = top_level_return(text) else {
         theme.problems.push(Problem {
             span: (0, 0),
-            message: "enamel.luau must end in `return { ... }` with `colors`, `fonts`, and `classes` tables".into(),
+            message: "enamel.aly must end in `return { ... }` with `colors`, `fonts`, and `classes` tables".into(),
         });
 
         return theme;
