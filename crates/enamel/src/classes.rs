@@ -57,7 +57,11 @@ impl Class {
         let mut variants = Vec::new();
         let mut unknown_variant = None;
 
-        while let Some(colon) = rest.find(':') {
+        // A colon inside brackets belongs to the value,
+        // `image-[rbxassetid://1]`; a variant's colon comes before any.
+        while let Some(colon) = rest.find(':')
+            && rest.find('[').is_none_or(|b| colon < b)
+        {
             let word = &rest[..colon];
 
             match Variant::parse(word) {
@@ -339,6 +343,11 @@ fn arbitrary(word: &str) -> Option<&str> {
     word.strip_prefix('[')?.strip_suffix(']')
 }
 
+/// A plain number, or one in brackets: `3`, `[3]`, `[-2.5]`.
+fn number(word: &str) -> Option<f64> {
+    arbitrary(word).unwrap_or(word).parse().ok()
+}
+
 /// A ratio: `50` is half, `[0.35]` is as written.
 fn ratio(word: &str) -> Option<f64> {
     if let Some(inner) = arbitrary(word) {
@@ -387,11 +396,19 @@ pub fn color(word: &str, theme: &Theme) -> Option<ColorValue> {
     };
 
     if let Some(inner) = arbitrary(name) {
-        let c = hex(inner).or_else(|| rgb(inner))?;
+        if let Some(c) = hex(inner).or_else(|| rgb(inner)) {
+            return Some(ColorValue {
+                expr: color3(c),
+                rgb: Some(c),
+                alpha,
+            });
+        }
 
+        // Anything else in the brackets is Luau, copied as written; an
+        // underscore stands for a space, since a class holds none.
         return Some(ColorValue {
-            expr: color3(c),
-            rgb: Some(c),
+            expr: inner.replace('_', " "),
+            rgb: None,
             alpha,
         });
     }
@@ -479,7 +496,14 @@ fn radius(word: &str) -> Option<Dim> {
         "2xl" => Dim::px(16.0),
         "3xl" => Dim::px(24.0),
         "full" => Dim::scale(1.0),
-        _ => Dim::px(arbitrary(word).and_then(length)?),
+        _ => {
+            let inner = arbitrary(word)?;
+
+            match inner.strip_suffix('%') {
+                Some(p) => Dim::scale(p.parse::<f64>().ok()? / 100.0),
+                None => Dim::px(length(inner)?),
+            }
+        }
     })
 }
 
@@ -524,8 +548,9 @@ fn leading(word: &str) -> Option<f64> {
         "normal" => 1.5,
         "relaxed" => 1.625,
         "loose" => 2.0,
-        // A numeric leading is a length on the web; against the base
-        // text size it is a ratio here.
+        // In brackets the multiplier is as written; a numeric leading is
+        // a length on the web, and against the base text size a ratio.
+        _ if arbitrary(word).is_some() => arbitrary(word)?.parse().ok()?,
         _ => spacing(word)? / 16.0,
     })
 }
@@ -1386,7 +1411,7 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
             ))
         }
         "layout" | "display" => {
-            let n: f64 = rest.parse().ok()?;
+            let n = number(rest)?;
             let n = n * neg;
 
             Some(utility(
@@ -1428,7 +1453,7 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
             ))
         }
         "max-graphemes" => {
-            let n: f64 = rest.parse().ok()?;
+            let n = number(rest)?;
 
             Some(utility(
                 vec![prop("MaxVisibleGraphemes", num(n), Needs::Text)],
@@ -1533,7 +1558,7 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
         }
         "grid" => {
             let (kind, n) = rest.split_once('-')?;
-            let n: f64 = n.parse().ok()?;
+            let n = number(n)?;
 
             match kind {
                 "cols" => Some(utility(
@@ -1598,7 +1623,7 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
         }
         "translate" => {
             let (axis, value) = rest.split_once('-')?;
-            let f = fraction(value)?;
+            let f = fraction(value).or_else(|| arbitrary(value).and_then(|a| a.parse().ok()))?;
             let anchor = if class.negative { f } else { -f };
             let piece = match axis {
                 "x" => Piece::AnchorX(anchor),
@@ -1624,7 +1649,7 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
             ))
         }
         "order" => {
-            let n: f64 = rest.parse().ok()?;
+            let n = number(rest)?;
 
             Some(utility(
                 vec![prop("LayoutOrder", num(n * neg), Needs::Gui)],
@@ -1785,6 +1810,17 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
             })
         }
         "image" => {
+            if let Some(inner) = arbitrary(rest)
+                && (inner.starts_with("rbxassetid://")
+                    || inner.starts_with("rbxasset://")
+                    || inner.starts_with("http"))
+            {
+                return Some(utility(
+                    vec![prop("Image", format!("\"{inner}\""), Needs::Image)],
+                    format!("the image `{inner}`"),
+                ));
+            }
+
             let c = color(rest, theme)?;
             let mut pieces = vec![prop("ImageColor3", c.expr.clone(), Needs::Image)];
 
@@ -1813,6 +1849,19 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
                         Piece::Theme,
                     ],
                     format!("the theme's font `{rest}`"),
+                ));
+            }
+
+            if let Some(inner) = arbitrary(rest) {
+                let family = if inner.contains("://") {
+                    inner.replace('_', " ")
+                } else {
+                    fonts::family_path(inner)
+                };
+
+                return Some(utility(
+                    vec![prop("__family", family.clone(), Needs::Text)],
+                    format!("the family `{family}`"),
                 ));
             }
 
@@ -2935,6 +2984,58 @@ mod tests {
                 .contains(&("AutomaticCanvasSize".into(), "Enum.AutomaticSize.Y".into()))
         );
         assert!(s.problems.is_empty(), "{:?}", s.problems);
+    }
+
+    #[test]
+    fn brackets_take_any_value() {
+        let r = resolved(
+            "ImageButton",
+            "stroke-[3px] stroke-transparency-[0.4] bg-transparency-[35%] image-transparency-[0.1] order-[7] leading-[1.4] rounded-[50%] bg-[Color3.fromHSV(0.5,_1,_1)] image-[rbxassetid://123] font-[Montserrat]",
+        );
+        assert!(
+            r.props
+                .contains(&("BackgroundTransparency".into(), "0.35".into()))
+        );
+        assert!(
+            r.props
+                .contains(&("ImageTransparency".into(), "0.1".into()))
+        );
+        assert!(r.props.contains(&("LayoutOrder".into(), "7".into())));
+        assert!(r.props.contains(&(
+            "BackgroundColor3".into(),
+            "Color3.fromHSV(0.5, 1, 1)".into()
+        )));
+        assert!(
+            r.props
+                .contains(&("Image".into(), "\"rbxassetid://123\"".into()))
+        );
+
+        let stroke = r.children.iter().find(|c| c.class == "UIStroke").unwrap();
+        assert!(stroke.props.contains(&("Thickness".into(), "3".into())));
+        assert!(
+            stroke
+                .props
+                .contains(&("Transparency".into(), "0.4".into()))
+        );
+        assert!(
+            r.children
+                .iter()
+                .any(|c| c.class == "UICorner" && c.props[0].1 == "UDim.new(0.5, 0)")
+        );
+        assert!(
+            r.problems
+                .iter()
+                .all(|(_, p)| matches!(p, Problem::WrongElement(..))),
+            "{:?}",
+            r.problems
+        );
+        let t = resolved("TextLabel", "leading-[1.4] font-[Montserrat]");
+        assert!(t.props.contains(&("LineHeight".into(), "1.4".into())));
+        assert!(
+            t.props
+                .iter()
+                .any(|(k, v)| k == "FontFace" && v.contains("Montserrat.json"))
+        );
     }
 
     #[test]

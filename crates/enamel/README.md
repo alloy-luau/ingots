@@ -69,6 +69,19 @@ their own, so the file reads like the Explorer:
 | `ignore-inset`, `reset-on-spawn`, `keep-on-spawn`, `sibling-z`, `global-z` | a `ScreenGui`'s inset, reset, and `ZIndexBehavior` |
 | `max-graphemes-20` | `MaxVisibleGraphemes` |
 
+## Brackets
+
+A value in brackets is as written, on any utility that takes a number,
+a length, a color, or a ratio: `w-[200px]`, `w-[50%]`, `p-[10px]`,
+`gap-[6px]`, `rounded-[12px]`, `rounded-[50%]`, `text-[14px]`,
+`text-size-[14px]`, `z-[100]`, `order-[7]`, `rotate-[45deg]`,
+`scale-[1.2]`, `aspect-[4/3]`, `leading-[1.4]`, `stroke-[3px]`,
+`stroke-transparency-[0.4]`, `bg-transparency-[35%]`, and the other
+transparencies. A color in brackets is a hex, an `rgb(r,g,b)`, or any
+Luau that makes one, `bg-[Color3.fromHSV(0.5,_1,_1)]`, with `_` for a
+space; `image-[rbxassetid://123]` sets the image itself, and
+`font-[Montserrat]` names a family file, or a whole path with `://`.
+
 ## Fonts
 
 Every family Roblox ships is a class, by the name `Enum.Font` gives it:
