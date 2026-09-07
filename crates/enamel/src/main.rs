@@ -189,19 +189,6 @@ impl Handler for Enamel {
 
         self.sync_theme();
 
-        // A broken theme fails every markup file that has classes, with
-        // the theme's own line in the message: the file is outside the
-        // sources, so the lints never reach it on their own.
-        if let Some(problem) = self.ctx.theme.problems.first()
-            && file.source.contains("ClassName=")
-        {
-            let text = std::fs::read_to_string(self.watched.path().unwrap_or_default())
-                .unwrap_or_default();
-            let line = text[..problem.span.0.min(text.len())].matches('\n').count() + 1;
-
-            return Err(format!("{}:{line}: {}", theme::FILE_NAME, problem.message));
-        }
-
         let found = markup::find(&file.source);
         let plans = self.plans(&found);
         let mut edits = Vec::new();
@@ -255,6 +242,23 @@ impl Handler for Enamel {
         self.sync_theme();
         let found = markup::find(&file.source);
         let mut out = Vec::new();
+
+        // A broken theme reports once, on the first class list, with the
+        // theme's own line: the file sits outside the sources, so the
+        // lints never reach it on their own. The transform still ran
+        // with what the theme had, so no other error follows.
+        if let Some(problem) = self.ctx.theme.problems.first()
+            && let Some(first) = found.first()
+        {
+            let text = std::fs::read_to_string(self.watched.path().unwrap_or_default())
+                .unwrap_or_default();
+            let line = text[..problem.span.0.min(text.len())].matches('\n').count() + 1;
+            out.push(Finding::new(
+                "theme",
+                (first.attr.0 as u32, first.attr.1 as u32),
+                format!("{}:{line}: {}", theme::FILE_NAME, problem.message),
+            ));
+        }
 
         for plan in self.plans(&found) {
             let f = plan.found;
