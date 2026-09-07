@@ -47,6 +47,28 @@ In the editor, hover on a class shows what it sets, completion lists
 every utility with a swatch beside each color, and a color class shows
 its swatch in the text.
 
+## Roblox properties by name
+
+Beside Tailwind's names, the properties a GuiObject has get words of
+their own, so the file reads like the Explorer:
+
+| Class | Property |
+| --- | --- |
+| `bg-transparency-50`, `text-transparency-50`, `image-transparency-50`, `group-transparency-50`, `transparency-50` | the `Transparency` properties, `[0.35]` for a ratio |
+| `stroke`, `stroke-2`, `stroke-red-500`, `stroke-transparency-25`, `stroke-contextual`, `stroke-round` | a `UIStroke`: thickness, color, transparency, apply mode, join |
+| `text-stroke-black`, `text-stroke-transparency-50` | `TextStrokeColor3` and `TextStrokeTransparency` |
+| `text-size-18` | `TextSize` in pixels |
+| `anchor-center`, `anchor-tl` through `anchor-br`, `center` | `AnchorPoint`, and `center` with the position that centers |
+| `clip`, `no-clip` | `ClipsDescendants` |
+| `layout-3`, `display-3` | `LayoutOrder` and `DisplayOrder` |
+| `sort-name`, `sort-order` | the list layout's `SortOrder` |
+| `fill` | a `UIFlexItem` with `FlexMode.Fill` |
+| `image-slice`, `image-tile`, `image-transparent` | `ScaleType` and `ImageTransparency` |
+| `scroll-x`, `scroll-y`, `scroll-xy`, `no-scroll`, `canvas-auto`, `canvas-h-400`, `canvas-w-200`, `elastic`, `no-elastic`, `scrollbar-4` | a `ScrollingFrame`'s direction, canvas, elastic behavior, bar |
+| `auto-color`, `no-auto-color`, `modal` | a button's `AutoButtonColor` and `Modal` |
+| `ignore-inset`, `reset-on-spawn`, `keep-on-spawn`, `sibling-z`, `global-z` | a `ScreenGui`'s inset, reset, and `ZIndexBehavior` |
+| `max-graphemes-20` | `MaxVisibleGraphemes` |
+
 ## Fonts
 
 Every family Roblox ships is a class, by the name `Enum.Font` gives it:
@@ -60,22 +82,31 @@ with any of them into one `FontFace`.
 `enamel.aly` at the project root holds the colors, fonts, and classes
 of the project, written as Alloy with the Roblox API. Enamel never runs
 the file: each entry is the text of an expression, copied into the
-generated markup the way a macro copies its body, and the statements
-before the `return` are copied once into any `.alx` file that uses an
-entry, so a local defined there is in scope.
+generated markup the way a macro copies its body, and the other
+statements are copied once into any `.alx` file that uses an entry, so
+a local defined there is in scope.
+
+The file is a module that exports the three tables, which game code
+may import as well:
 
 ```alloy
 local purple = Color3.fromRGB(138, 61, 245)
 
-return {
-    colors = { brand = purple, accent = "#ff8a00" },
-    fonts = { title = Font.new("rbxasset://fonts/families/Montserrat.json", Enum.FontWeight.Bold) },
-    classes = {
-        card = "bg-slate-900/80 rounded-xl p-4",
-        glow = { BackgroundColor3 = purple, ZIndex = 2 },
-    },
+export const colors = { brand = purple, accent = "#ff8a00" }
+export const fonts = { title = Font.new("rbxasset://fonts/families/Montserrat.json", Enum.FontWeight.Bold) }
+export const classes = {
+    card = "bg-slate-900/80 rounded-xl p-4",
+    glow = { BackgroundColor3 = purple, ZIndex = 2 },
 }
 ```
+
+A `return { colors = ..., fonts = ..., classes = ... }` of one table
+works the same, and there a table may be the name of one defined above
+the return.
+
+A color entry may name a local, `brand = purple`; the swatch reads
+through to what the local holds. The tables are typed for the editor,
+so a value of the wrong kind is marked there too.
 
 A color name works wherever a palette name does, `bg-brand`,
 `text-brand/50`, `from-accent`; a font name as `font-title`, and

@@ -1,19 +1,20 @@
 //! The project's `enamel.aly`: fonts, colors, and classes of its own,
 //! written as Alloy with the Roblox API. Enamel never runs it. Each entry
 //! is the text of an expression, copied into the generated attribute
-//! the way a macro would; the statements before the `return` are the
-//! prelude, copied once into a file that uses one of the entries.
+//! the way a macro would; the other statements are the prelude, copied
+//! once into a file that uses one of the entries.
+//!
+//! Two shapes: a module that exports the three tables, which game code
+//! may import too, or a `return` of one table that holds them.
 //!
 //! ```alloy
 //! local purple = Color3.fromRGB(138, 61, 245)
 //!
-//! return {
-//!     colors = { brand = purple, accent = "#ff8a00" },
-//!     fonts = { title = Font.new("rbxasset://fonts/families/Montserrat.json", Enum.FontWeight.Bold) },
-//!     classes = {
-//!         card = "bg-slate-900/80 rounded-xl p-4",
-//!         glow = { BackgroundColor3 = purple, ZIndex = 2 },
-//!     },
+//! export const colors = { brand = purple, accent = "#ff8a00" }
+//! export const fonts = { title = Font.new("rbxasset://fonts/families/Montserrat.json", Enum.FontWeight.Bold) }
+//! export const classes = {
+//!     card = "bg-slate-900/80 rounded-xl p-4",
+//!     glow = { BackgroundColor3 = purple, ZIndex = 2 },
 //! }
 //! ```
 
@@ -30,6 +31,17 @@ pub const FILE_NAME: &str = "enamel.aly";
 pub struct Entry {
     pub expr: String,
     pub span: (usize, usize),
+    /// The expression behind a bare name, from the prelude, for the
+    /// color the reader sees.
+    pub seen: Option<String>,
+}
+
+impl Entry {
+    /// The color of the entry, read from its expression or from what
+    /// the name it holds is bound to.
+    pub fn color(&self) -> Option<(u8, u8, u8)> {
+        color_of(&self.expr).or_else(|| self.seen.as_deref().and_then(color_of))
+    }
 }
 
 /// A class of the theme: a class list to expand, or properties to set.
@@ -46,10 +58,29 @@ pub struct Problem {
     pub message: String,
 }
 
+/// The type the editor sees the returned table as, so its keys complete
+/// and a wrong one is marked there too.
+pub const TYPE: &str = "type EnamelTheme = { colors: { [string]: Color3 | string }?, fonts: { [string]: Font }?, classes: { [string]: string | { [string]: any } }? }";
+
+/// The type of one theme table, for the module shape.
+pub fn table_type(name: &str) -> &'static str {
+    match name {
+        "colors" => "{ [string]: Color3 | string }",
+        "fonts" => "{ [string]: Font }",
+        _ => "{ [string]: string | { [string]: any } }",
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Theme {
     /// The statements before the `return`, as one line.
     pub prelude: String,
+    /// The bytes of the returned table, from its `{` to past its `}`,
+    /// when the file returns one.
+    pub table: Option<(usize, usize)>,
+    /// The end of each exported table's name, for the type the editor
+    /// gets: `(name, byte)`.
+    pub exported: Vec<(String, usize)>,
     pub colors: BTreeMap<String, Entry>,
     pub fonts: BTreeMap<String, Entry>,
     pub classes: BTreeMap<String, (ClassDef, (usize, usize))>,
@@ -114,12 +145,7 @@ pub fn parse(text: &str) -> Theme {
     let mut theme = Theme::default();
     let bytes = text.as_bytes();
     let Some(ret) = top_level_return(text) else {
-        theme.problems.push(Problem {
-            span: (0, 0),
-            message: "enamel.aly must end in `return { ... }` with `colors`, `fonts`, and `classes` tables".into(),
-        });
-
-        return theme;
+        return parse_exports(text);
     };
     theme.prelude = flatten(&text[..ret]);
     let after = ret + "return".len();
@@ -143,76 +169,29 @@ pub fn parse(text: &str) -> Theme {
             return theme;
         }
     };
+    theme.table = Some((open, close + 1));
 
     for (key, key_span, value, value_span) in fields(text, open + 1, close) {
-        let Some(vopen) = value.strip_prefix('{').map(|_| value_span.0) else {
+        // The table itself, or the name of one defined above the return:
+        // `colors = colors` after `export const colors = { ... }`.
+        let (vopen, vclose) = if value.starts_with('{') {
+            (value_span.0, value_span.1 - 1)
+        } else if let Some((s, e)) = defined_table(text, ret, &value) {
+            (s, e)
+        } else {
             theme.problems.push(Problem {
                 span: key_span,
-                message: format!("`{key}` must be a table"),
+                message: format!(
+                    "`{key}` must be a table, or the name of one defined above the return"
+                ),
             });
 
             continue;
         };
-        let vclose = value_span.1 - 1;
 
         match key.as_str() {
-            "colors" | "fonts" => {
-                let map = if key == "colors" {
-                    &mut theme.colors
-                } else {
-                    &mut theme.fonts
-                };
-
-                for (name, name_span, expr, span) in fields(text, vopen + 1, vclose) {
-                    if !valid_name(&name) {
-                        theme.problems.push(Problem {
-                            span: name_span,
-                            message: format!(
-                                "`{name}` is not a class name: letters, digits, `-`, and `_`"
-                            ),
-                        });
-
-                        continue;
-                    }
-
-                    map.insert(name, Entry { expr, span });
-                }
-            }
-
-            "classes" => {
-                for (name, name_span, expr, span) in fields(text, vopen + 1, vclose) {
-                    if !valid_name(&name) {
-                        theme.problems.push(Problem {
-                            span: name_span,
-                            message: format!(
-                                "`{name}` is not a class name: letters, digits, `-`, and `_`"
-                            ),
-                        });
-
-                        continue;
-                    }
-
-                    let def = if let Some(inner) = string_literal(&expr) {
-                        ClassDef::Classes(inner)
-                    } else if expr.starts_with('{') {
-                        let props = fields(text, span.0 + 1, span.1 - 1)
-                            .into_iter()
-                            .map(|(k, _, v, _)| (k, v))
-                            .collect();
-
-                        ClassDef::Props(props)
-                    } else {
-                        theme.problems.push(Problem {
-                            span,
-                            message: format!(
-                                "`{name}` must be a string of classes or a table of properties"
-                            ),
-                        });
-
-                        continue;
-                    };
-                    theme.classes.insert(name, (def, name_span));
-                }
+            "colors" | "fonts" | "classes" => {
+                read_table(text, &mut theme, &key, vopen, vclose, ret)
             }
 
             _ => theme.problems.push(Problem {
@@ -225,6 +204,192 @@ pub fn parse(text: &str) -> Theme {
     }
 
     theme
+}
+
+/// The `{ ... }` a `local`, `const`, or `export const` binds to `name`
+/// before `before`: the byte of its `{` and the byte of its `}`.
+fn defined_table(text: &str, before: usize, name: &str) -> Option<(usize, usize)> {
+    let head = &text[..before];
+    let bytes = text.as_bytes();
+
+    for (at, _) in head.match_indices(name) {
+        let bounded = at.checked_sub(1).is_none_or(|b| !is_word(bytes[b]))
+            && !bytes.get(at + name.len()).is_some_and(|b| is_word(*b));
+        let line_start = head[..at].rfind('\n').map_or(0, |i| i + 1);
+        let keyword = head[line_start..at].trim();
+
+        if !bounded || !matches!(keyword, "local" | "const" | "export const" | "export local") {
+            continue;
+        }
+
+        let after = head[at + name.len()..].trim_start();
+
+        if let Some(rest) = after.strip_prefix('=')
+            && rest.trim_start().starts_with('{')
+        {
+            let open = before - after.len()
+                + (after.len() - rest.len())
+                + (rest.len() - rest.trim_start().len());
+            let close = group_end(bytes, open)?;
+
+            return Some((open, close));
+        }
+    }
+
+    None
+}
+
+/// The expression a `local` or `const` binds to `name` before `before`,
+/// for a color entry that names one: `brand = purple`.
+pub fn defined_value(text: &str, before: usize, name: &str) -> Option<String> {
+    let head = &text[..before];
+    let bytes = text.as_bytes();
+
+    for (at, _) in head.match_indices(name) {
+        let bounded = at.checked_sub(1).is_none_or(|b| !is_word(bytes[b]))
+            && !bytes.get(at + name.len()).is_some_and(|b| is_word(*b));
+        let line_start = head[..at].rfind('\n').map_or(0, |i| i + 1);
+        let keyword = head[line_start..at].trim();
+
+        if !bounded || !matches!(keyword, "local" | "const" | "export const" | "export local") {
+            continue;
+        }
+
+        let after = head[at + name.len()..].trim_start();
+        let rest = after.strip_prefix('=')?;
+        let from = before - rest.len();
+        // The statement's own line: a value that opens a table spans
+        // more, and `defined_table` reads that one.
+        let line_end = text[from..before].find('\n').map_or(before, |i| from + i);
+        let end = value_end(text, from, line_end);
+
+        return Some(text[from..end].trim().to_string());
+    }
+
+    None
+}
+
+/// The module shape: `colors`, `fonts`, and `classes` as tables the
+/// file defines at the top level, exported or not. The whole file is
+/// the prelude, with `export` stripped so a copy exports nothing.
+fn parse_exports(text: &str) -> Theme {
+    let mut theme = Theme::default();
+    let end = text.len();
+    theme.prelude = flatten(&text.replace("export ", ""));
+    let mut any = false;
+
+    for key in ["colors", "fonts", "classes"] {
+        let Some((open, close)) = defined_table(text, end, key) else {
+            continue;
+        };
+        any = true;
+
+        if let Some(name_end) = defined_name_end(text, end, key) {
+            theme.exported.push((key.to_string(), name_end));
+        }
+
+        read_table(text, &mut theme, key, open, close, end);
+    }
+
+    if !any {
+        theme.problems.push(Problem {
+            span: (0, 0),
+            message: "enamel.aly defines `colors`, `fonts`, and `classes` tables, exported at the top level or returned in one table".into(),
+        });
+    }
+
+    theme
+}
+
+/// The end of the name a `local`, `const`, or `export const` binds a
+/// table to, before `before`.
+fn defined_name_end(text: &str, before: usize, name: &str) -> Option<usize> {
+    let head = &text[..before];
+    let bytes = text.as_bytes();
+
+    for (at, _) in head.match_indices(name) {
+        let bounded = at.checked_sub(1).is_none_or(|b| !is_word(bytes[b]))
+            && !bytes.get(at + name.len()).is_some_and(|b| is_word(*b));
+        let line_start = head[..at].rfind('\n').map_or(0, |i| i + 1);
+        let keyword = head[line_start..at].trim();
+
+        if bounded && matches!(keyword, "local" | "const" | "export const" | "export local") {
+            return Some(at + name.len());
+        }
+    }
+
+    None
+}
+
+/// Reads one theme table, `colors`, `fonts`, or `classes`, between its
+/// braces; `scope` bounds where a bare name's definition may sit.
+fn read_table(text: &str, theme: &mut Theme, key: &str, vopen: usize, vclose: usize, scope: usize) {
+    match key {
+        "colors" | "fonts" => {
+            for (name, name_span, expr, span) in fields(text, vopen + 1, vclose) {
+                if !valid_name(&name) {
+                    theme.problems.push(Problem {
+                        span: name_span,
+                        message: format!(
+                            "`{name}` is not a class name: letters, digits, `-`, and `_`"
+                        ),
+                    });
+
+                    continue;
+                }
+
+                // A bare name reads through to what the prelude binds it
+                // to, so `brand = purple` keeps purple's color.
+                let seen = if expr.chars().all(|c| is_word(c as u8)) {
+                    defined_value(text, scope, &expr)
+                } else {
+                    None
+                };
+                let map = if key == "colors" {
+                    &mut theme.colors
+                } else {
+                    &mut theme.fonts
+                };
+                map.insert(name, Entry { expr, span, seen });
+            }
+        }
+
+        _ => {
+            for (name, name_span, expr, span) in fields(text, vopen + 1, vclose) {
+                if !valid_name(&name) {
+                    theme.problems.push(Problem {
+                        span: name_span,
+                        message: format!(
+                            "`{name}` is not a class name: letters, digits, `-`, and `_`"
+                        ),
+                    });
+
+                    continue;
+                }
+
+                let def = if let Some(inner) = string_literal(&expr) {
+                    ClassDef::Classes(inner)
+                } else if expr.starts_with('{') {
+                    let props = fields(text, span.0 + 1, span.1 - 1)
+                        .into_iter()
+                        .map(|(k, _, v, _)| (k, v))
+                        .collect();
+
+                    ClassDef::Props(props)
+                } else {
+                    theme.problems.push(Problem {
+                        span,
+                        message: format!(
+                            "`{name}` must be a string of classes or a table of properties"
+                        ),
+                    });
+
+                    continue;
+                };
+                theme.classes.insert(name, (def, name_span));
+            }
+        }
+    }
 }
 
 fn valid_name(name: &str) -> bool {
@@ -557,6 +722,35 @@ mod tests {
             ])
         );
         assert!(t.problems.is_empty());
+    }
+
+    #[test]
+    fn a_table_may_be_named_and_a_color_may_name_a_local() {
+        let src = "local purple = Color3.fromRGB(138, 61, 245)\nexport const colors = {\n    brand = purple,\n    gold = \"#ffd08a\",\n}\n\nreturn {\n    colors = colors,\n    classes = { card = \"bg-brand\" },\n}\n";
+        let t = parse(src);
+        assert!(t.problems.is_empty(), "{:?}", t.problems);
+        assert_eq!(t.colors["brand"].expr, "purple");
+        assert_eq!(t.colors["brand"].color(), Some((138, 61, 245)));
+        assert_eq!(t.colors["gold"].color(), Some((255, 208, 138)));
+        assert!(t.prelude.contains("export const colors = {"));
+    }
+
+    #[test]
+    fn a_module_that_exports_the_tables_is_a_theme() {
+        let src = "local purple = Color3.fromRGB(138, 61, 245)\n\nexport const colors = {\n    brand = purple,\n    gold = \"#ffd08a\",\n}\n\nexport const classes = { card = \"bg-brand rounded-xl\" }\n";
+        let t = parse(src);
+        assert!(t.problems.is_empty(), "{:?}", t.problems);
+        assert_eq!(t.colors["brand"].color(), Some((138, 61, 245)));
+        assert_eq!(
+            t.classes["card"].0,
+            ClassDef::Classes("bg-brand rounded-xl".into())
+        );
+        assert!(
+            t.prelude
+                .starts_with("local purple = Color3.fromRGB(138, 61, 245) const colors = {")
+        );
+        assert!(!t.prelude.contains("export"));
+        assert_eq!(t.exported.len(), 2);
     }
 
     #[test]

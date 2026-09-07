@@ -159,6 +159,30 @@ impl Handler for Enamel {
     }
 
     fn transform(&mut self, file: &File) -> Result<Vec<Edit>, String> {
+        // The theme file: its table takes the theme's type, so the keys
+        // complete and a key the theme lacks is marked as the editor
+        // reads it.
+        if file.path == theme::FILE_NAME {
+            let t = theme::parse(&file.source);
+
+            if let Some((open, end)) = t.table {
+                return Ok(vec![
+                    Edit::insert(emit::helper_at(&file.source), format!("{} ", theme::TYPE)),
+                    Edit::insert(open as u32, "("),
+                    Edit::insert(end as u32, " :: EnamelTheme)"),
+                ]);
+            }
+
+            // The module shape: each exported table takes its type.
+            return Ok(t
+                .exported
+                .iter()
+                .map(|(name, at)| {
+                    Edit::insert(*at as u32, format!(": {}", theme::table_type(name)))
+                })
+                .collect());
+        }
+
         if file.kind != "alx" {
             return Ok(Vec::new());
         }
@@ -354,6 +378,22 @@ impl Handler for Enamel {
     }
 
     fn colors(&mut self, file: &File) -> Result<Vec<ColorInfo>, String> {
+        // The theme file: each color the ingot can read gets its square,
+        // on the expression, so `brand = purple` shows purple.
+        if file.path == theme::FILE_NAME {
+            let t = theme::parse(&file.source);
+
+            return Ok(t
+                .colors
+                .values()
+                .filter_map(|e| {
+                    let rgb = e.color()?;
+
+                    Some(ColorInfo::rgb((e.span.0 as u32, e.span.1 as u32), rgb, 1.0))
+                })
+                .collect());
+        }
+
         if file.kind != "alx" {
             return Ok(Vec::new());
         }
@@ -382,6 +422,16 @@ impl Handler for Enamel {
         span: (u32, u32),
         color: Color,
     ) -> Result<Vec<String>, String> {
+        // The theme file: the picker writes the expression forms.
+        if file.path == theme::FILE_NAME {
+            let (r, g, b) = color.rgb8();
+
+            return Ok(vec![
+                format!("Color3.fromRGB({r}, {g}, {b})"),
+                format!("\"{}\"", palette::hex((r, g, b))),
+            ]);
+        }
+
         if file.kind != "alx" {
             return Ok(Vec::new());
         }

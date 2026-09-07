@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use crate::fonts;
 use crate::palette;
-use crate::theme::{self, ClassDef, Theme};
+use crate::theme::{ClassDef, Theme};
 
 /// The state a variant binds a utility to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -339,6 +339,18 @@ fn arbitrary(word: &str) -> Option<&str> {
     word.strip_prefix('[')?.strip_suffix(']')
 }
 
+/// A ratio: `50` is half, `[0.35]` is as written.
+fn ratio(word: &str) -> Option<f64> {
+    if let Some(inner) = arbitrary(word) {
+        return inner.strip_suffix('%').map_or_else(
+            || inner.parse().ok(),
+            |p| p.parse::<f64>().ok().map(|n| n / 100.0),
+        );
+    }
+
+    word.parse::<f64>().ok().map(|n| n / 100.0)
+}
+
 /// A CSS length in pixels: `12px`, `12`, `0.5rem`.
 fn length(text: &str) -> Option<f64> {
     if let Some(px) = text.strip_suffix("px") {
@@ -387,7 +399,7 @@ pub fn color(word: &str, theme: &Theme) -> Option<ColorValue> {
     if let Some(entry) = theme.colors.get(name) {
         return Some(ColorValue {
             expr: entry.expr.clone(),
-            rgb: theme::color_of(&entry.expr),
+            rgb: entry.color(),
             alpha,
         });
     }
@@ -992,6 +1004,251 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
             vec![Piece::AutoX, Piece::AutoY],
             "the size follows the content",
         )),
+        "clip" => Some(utility(
+            vec![prop("ClipsDescendants", "true", Needs::Gui)],
+            "clips the children to the element",
+        )),
+        "no-clip" => Some(utility(
+            vec![prop("ClipsDescendants", "false", Needs::Gui)],
+            "children may draw outside the element",
+        )),
+        "anchor-center" => Some(utility(
+            vec![Piece::AnchorX(0.5), Piece::AnchorY(0.5)],
+            "anchors at the center",
+        )),
+        "anchor-tl" => Some(utility(
+            vec![Piece::AnchorX(0.0), Piece::AnchorY(0.0)],
+            "anchors at the top left",
+        )),
+        "anchor-t" => Some(utility(
+            vec![Piece::AnchorX(0.5), Piece::AnchorY(0.0)],
+            "anchors at the top center",
+        )),
+        "anchor-tr" => Some(utility(
+            vec![Piece::AnchorX(1.0), Piece::AnchorY(0.0)],
+            "anchors at the top right",
+        )),
+        "anchor-l" => Some(utility(
+            vec![Piece::AnchorX(0.0), Piece::AnchorY(0.5)],
+            "anchors at the left",
+        )),
+        "anchor-r" => Some(utility(
+            vec![Piece::AnchorX(1.0), Piece::AnchorY(0.5)],
+            "anchors at the right",
+        )),
+        "anchor-bl" => Some(utility(
+            vec![Piece::AnchorX(0.0), Piece::AnchorY(1.0)],
+            "anchors at the bottom left",
+        )),
+        "anchor-b" => Some(utility(
+            vec![Piece::AnchorX(0.5), Piece::AnchorY(1.0)],
+            "anchors at the bottom center",
+        )),
+        "anchor-br" => Some(utility(
+            vec![Piece::AnchorX(1.0), Piece::AnchorY(1.0)],
+            "anchors at the bottom right",
+        )),
+        "center" => Some(utility(
+            vec![
+                Piece::PosX {
+                    dim: Dim::scale(0.5),
+                    from_end: false,
+                },
+                Piece::PosY {
+                    dim: Dim::scale(0.5),
+                    from_end: false,
+                },
+                Piece::AnchorX(0.5),
+                Piece::AnchorY(0.5),
+            ],
+            "centers the element in its parent",
+        )),
+        "stroke" => Some(utility(
+            vec![Piece::Stroke("Thickness", "1".into())],
+            "a UIStroke one pixel wide",
+        )),
+        "stroke-0" => Some(utility(
+            vec![Piece::Stroke("Thickness", "0".into())],
+            "no stroke",
+        )),
+        "stroke-transparent" => Some(utility(
+            vec![Piece::Stroke("Transparency", "1".into())],
+            "an invisible stroke",
+        )),
+        "stroke-contextual" => Some(utility(
+            vec![Piece::Stroke(
+                "ApplyStrokeMode",
+                "Enum.ApplyStrokeMode.Contextual".into(),
+            )],
+            "the stroke follows the text, not the border",
+        )),
+        "stroke-border" => Some(utility(
+            vec![Piece::Stroke(
+                "ApplyStrokeMode",
+                "Enum.ApplyStrokeMode.Border".into(),
+            )],
+            "the stroke follows the border",
+        )),
+        "stroke-round" => Some(utility(
+            vec![Piece::Stroke(
+                "LineJoinMode",
+                "Enum.LineJoinMode.Round".into(),
+            )],
+            "round stroke joins",
+        )),
+        "stroke-bevel" => Some(utility(
+            vec![Piece::Stroke(
+                "LineJoinMode",
+                "Enum.LineJoinMode.Bevel".into(),
+            )],
+            "beveled stroke joins",
+        )),
+        "stroke-miter" => Some(utility(
+            vec![Piece::Stroke(
+                "LineJoinMode",
+                "Enum.LineJoinMode.Miter".into(),
+            )],
+            "mitered stroke joins",
+        )),
+        "text-stroke-transparent" => Some(utility(
+            vec![prop("TextStrokeTransparency", "1", Needs::Text)],
+            "no text outline",
+        )),
+        "sort-name" => Some(utility(
+            vec![Piece::Layout("SortOrder", "Enum.SortOrder.Name".into())],
+            "children sorted by name",
+        )),
+        "sort-order" => Some(utility(
+            vec![Piece::Layout(
+                "SortOrder",
+                "Enum.SortOrder.LayoutOrder".into(),
+            )],
+            "children sorted by LayoutOrder",
+        )),
+        "fill" => Some(utility(
+            vec![Piece::FlexItem("FlexMode", "Enum.UIFlexMode.Fill".into())],
+            "a UIFlexItem that fills the list",
+        )),
+        "image-slice" => Some(utility(
+            vec![prop("ScaleType", "Enum.ScaleType.Slice", Needs::Image)],
+            "the image nine-slices",
+        )),
+        "image-tile" => Some(utility(
+            vec![prop("ScaleType", "Enum.ScaleType.Tile", Needs::Image)],
+            "the image tiles",
+        )),
+        "image-transparent" => Some(utility(
+            vec![prop("ImageTransparency", "1", Needs::Image)],
+            "an invisible image",
+        )),
+        "scroll-x" => Some(utility(
+            vec![prop(
+                "ScrollingDirection",
+                "Enum.ScrollingDirection.X",
+                Needs::Scrolling,
+            )],
+            "scrolls sideways only",
+        )),
+        "scroll-y" => Some(utility(
+            vec![prop(
+                "ScrollingDirection",
+                "Enum.ScrollingDirection.Y",
+                Needs::Scrolling,
+            )],
+            "scrolls up and down only",
+        )),
+        "scroll-xy" => Some(utility(
+            vec![prop(
+                "ScrollingDirection",
+                "Enum.ScrollingDirection.XY",
+                Needs::Scrolling,
+            )],
+            "scrolls both ways",
+        )),
+        "no-scroll" => Some(utility(
+            vec![prop("ScrollingEnabled", "false", Needs::Scrolling)],
+            "the frame does not scroll",
+        )),
+        "canvas-auto" => Some(utility(
+            vec![prop(
+                "AutomaticCanvasSize",
+                "Enum.AutomaticSize.Y",
+                Needs::Scrolling,
+            )],
+            "the canvas grows with the content",
+        )),
+        "canvas-auto-x" => Some(utility(
+            vec![prop(
+                "AutomaticCanvasSize",
+                "Enum.AutomaticSize.X",
+                Needs::Scrolling,
+            )],
+            "the canvas grows sideways with the content",
+        )),
+        "canvas-auto-xy" => Some(utility(
+            vec![prop(
+                "AutomaticCanvasSize",
+                "Enum.AutomaticSize.XY",
+                Needs::Scrolling,
+            )],
+            "the canvas grows both ways",
+        )),
+        "elastic" => Some(utility(
+            vec![prop(
+                "ElasticBehavior",
+                "Enum.ElasticBehavior.Always",
+                Needs::Scrolling,
+            )],
+            "the canvas overscrolls",
+        )),
+        "no-elastic" => Some(utility(
+            vec![prop(
+                "ElasticBehavior",
+                "Enum.ElasticBehavior.Never",
+                Needs::Scrolling,
+            )],
+            "the canvas stops at its edge",
+        )),
+        "auto-color" => Some(utility(
+            vec![prop("AutoButtonColor", "true", Needs::Gui)],
+            "the button darkens when pressed",
+        )),
+        "no-auto-color" => Some(utility(
+            vec![prop("AutoButtonColor", "false", Needs::Gui)],
+            "the button keeps its color when pressed",
+        )),
+        "modal" => Some(utility(
+            vec![prop("Modal", "true", Needs::Gui)],
+            "the button frees the mouse",
+        )),
+        "ignore-inset" => Some(utility(
+            vec![prop("IgnoreGuiInset", "true", Needs::Layer)],
+            "the gui covers the top bar",
+        )),
+        "reset-on-spawn" => Some(utility(
+            vec![prop("ResetOnSpawn", "true", Needs::Layer)],
+            "the gui resets when the character spawns",
+        )),
+        "keep-on-spawn" => Some(utility(
+            vec![prop("ResetOnSpawn", "false", Needs::Layer)],
+            "the gui survives a respawn",
+        )),
+        "sibling-z" => Some(utility(
+            vec![prop(
+                "ZIndexBehavior",
+                "Enum.ZIndexBehavior.Sibling",
+                Needs::Layer,
+            )],
+            "ZIndex counts among siblings",
+        )),
+        "global-z" => Some(utility(
+            vec![prop(
+                "ZIndexBehavior",
+                "Enum.ZIndexBehavior.Global",
+                Needs::Layer,
+            )],
+            "ZIndex counts across the gui",
+        )),
         "uppercase" | "lowercase" | "capitalize" | "normal-case" => {
             no("a text transform runs at render time on the web; set the text itself")
         }
@@ -1005,9 +1262,179 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
         return exact;
     }
 
-    let (head, rest) = base.split_once('-')?;
+    // A compound head first, `bg-transparency-50`; then the plain one.
+    const COMPOUND: &[&str] = &[
+        "bg-transparency",
+        "bg-opacity",
+        "text-transparency",
+        "text-opacity",
+        "stroke-transparency",
+        "border-transparency",
+        "border-opacity",
+        "image-transparency",
+        "image-opacity",
+        "group-transparency",
+        "text-stroke-transparency",
+        "text-stroke",
+        "text-size",
+        "max-graphemes",
+    ];
+    let (head, rest) = COMPOUND
+        .iter()
+        .find_map(|h| {
+            base.strip_prefix(h)
+                .and_then(|r| r.strip_prefix('-'))
+                .map(|r| (*h, r))
+        })
+        .or_else(|| base.split_once('-'))?;
 
     match head {
+        "bg-transparency"
+        | "bg-opacity"
+        | "text-transparency"
+        | "text-opacity"
+        | "stroke-transparency"
+        | "border-transparency"
+        | "border-opacity"
+        | "image-transparency"
+        | "image-opacity"
+        | "group-transparency"
+        | "text-stroke-transparency"
+        | "transparency" => {
+            let n = ratio(rest)?;
+            let value = if head.ends_with("opacity") {
+                1.0 - n
+            } else {
+                n
+            };
+            let t = num(value);
+            let pieces = match head {
+                "bg-transparency" | "bg-opacity" => {
+                    vec![prop("BackgroundTransparency", t.clone(), Needs::Gui)]
+                }
+                "text-transparency" | "text-opacity" => {
+                    vec![prop("TextTransparency", t.clone(), Needs::Text)]
+                }
+                "image-transparency" | "image-opacity" => {
+                    vec![prop("ImageTransparency", t.clone(), Needs::Image)]
+                }
+                "group-transparency" => vec![prop("GroupTransparency", t.clone(), Needs::Canvas)],
+                "text-stroke-transparency" => {
+                    vec![prop("TextStrokeTransparency", t.clone(), Needs::Text)]
+                }
+                "transparency" => vec![
+                    prop("BackgroundTransparency", t.clone(), Needs::Gui),
+                    prop("TextTransparency", t.clone(), Needs::Text),
+                    prop("ImageTransparency", t.clone(), Needs::Image),
+                ],
+                _ => vec![Piece::Stroke("Transparency", t.clone())],
+            };
+
+            Some(utility(
+                pieces,
+                format!(
+                    "{} transparency {t}",
+                    head.split('-').next().unwrap_or(head)
+                ),
+            ))
+        }
+        "stroke" => {
+            if let Some(n) = arbitrary(rest)
+                .and_then(length)
+                .or_else(|| rest.parse().ok())
+            {
+                return Some(utility(
+                    vec![Piece::Stroke("Thickness", num(n))],
+                    format!("a UIStroke {} pixels wide", num(n)),
+                ));
+            }
+
+            let c = color(rest, theme)?;
+            let mut pieces = vec![Piece::Stroke("Color", c.expr.clone())];
+
+            if c.alpha < 1.0 {
+                pieces.push(Piece::Stroke("Transparency", num(1.0 - c.alpha)));
+            }
+
+            Some(Utility {
+                pieces,
+                summary: format!("a UIStroke colored {}", color_words(&c)),
+                color: c.rgb.map(|rgb| (rgb, c.alpha)),
+            })
+        }
+        "text-stroke" => {
+            let c = color(rest, theme)?;
+            let pieces = vec![
+                prop("TextStrokeColor3", c.expr.clone(), Needs::Text),
+                prop("TextStrokeTransparency", num(1.0 - c.alpha), Needs::Text),
+            ];
+
+            Some(Utility {
+                pieces,
+                summary: format!("a text outline colored {}", color_words(&c)),
+                color: c.rgb.map(|rgb| (rgb, c.alpha)),
+            })
+        }
+        "text-size" => {
+            let n = arbitrary(rest)
+                .and_then(length)
+                .or_else(|| rest.parse().ok())?;
+
+            Some(utility(
+                vec![prop("TextSize", num(n), Needs::Text)],
+                format!("text size {}", num(n)),
+            ))
+        }
+        "layout" | "display" => {
+            let n: f64 = rest.parse().ok()?;
+            let n = n * neg;
+
+            Some(utility(
+                vec![
+                    prop("LayoutOrder", num(n), Needs::Gui),
+                    prop("DisplayOrder", num(n), Needs::Layer),
+                ],
+                format!("order {}", num(n)),
+            ))
+        }
+        "canvas" => {
+            let (axis, value) = rest.split_once('-')?;
+            // A canvas is measured in pixels, as the Explorer shows it.
+            let d = fraction(value).map(Dim::scale).or_else(|| {
+                arbitrary(value)
+                    .and_then(length)
+                    .or_else(|| value.parse().ok())
+                    .map(Dim::px)
+            })?;
+            let (x, y) = match axis {
+                "w" => (d, Dim::px(0.0)),
+                "h" => (Dim::px(0.0), d),
+                _ => return None,
+            };
+
+            Some(utility(
+                vec![prop(
+                    "CanvasSize",
+                    format!(
+                        "UDim2.new({}, {}, {}, {})",
+                        num(x.scale),
+                        num(x.offset),
+                        num(y.scale),
+                        num(y.offset)
+                    ),
+                    Needs::Scrolling,
+                )],
+                format!("canvas {axis} {}", dim_words(d)),
+            ))
+        }
+        "max-graphemes" => {
+            let n: f64 = rest.parse().ok()?;
+
+            Some(utility(
+                vec![prop("MaxVisibleGraphemes", num(n), Needs::Text)],
+                format!("{} visible graphemes", num(n)),
+            ))
+        }
         "w" => Some(utility(
             vec![Piece::SizeX(dim(rest)?)],
             format!("width {}", dim_words(dim(rest)?)),
@@ -2187,6 +2614,63 @@ pub fn catalog(ctx: &Context) -> Vec<Entry> {
         "max-w-lg",
         "max-w-xl",
         "max-w-2xl",
+        "clip",
+        "no-clip",
+        "center",
+        "anchor-center",
+        "anchor-tl",
+        "anchor-t",
+        "anchor-tr",
+        "anchor-l",
+        "anchor-r",
+        "anchor-bl",
+        "anchor-b",
+        "anchor-br",
+        "stroke",
+        "stroke-0",
+        "stroke-2",
+        "stroke-transparent",
+        "stroke-contextual",
+        "stroke-border",
+        "stroke-round",
+        "stroke-bevel",
+        "stroke-miter",
+        "text-stroke-transparent",
+        "sort-name",
+        "sort-order",
+        "fill",
+        "image-slice",
+        "image-tile",
+        "image-transparent",
+        "scroll-x",
+        "scroll-y",
+        "scroll-xy",
+        "no-scroll",
+        "canvas-auto",
+        "canvas-auto-x",
+        "canvas-auto-xy",
+        "elastic",
+        "no-elastic",
+        "auto-color",
+        "no-auto-color",
+        "modal",
+        "ignore-inset",
+        "reset-on-spawn",
+        "keep-on-spawn",
+        "sibling-z",
+        "global-z",
+        "bg-transparency-50",
+        "text-transparency-50",
+        "stroke-transparency-50",
+        "image-transparency-50",
+        "group-transparency-50",
+        "transparency-50",
+        "text-size-14",
+        "text-size-18",
+        "text-size-24",
+        "canvas-h-200",
+        "canvas-w-200",
+        "max-graphemes-20",
     ]
     .iter()
     .map(|s| (*s).to_string())
@@ -2242,12 +2726,7 @@ pub fn catalog(ctx: &Context) -> Vec<Entry> {
     let color_names: Vec<(String, Option<Rgb>)> = palette::PALETTE
         .iter()
         .map(|(n, rgb)| ((*n).to_string(), Some(*rgb)))
-        .chain(
-            ctx.theme
-                .colors
-                .iter()
-                .map(|(n, e)| (n.clone(), theme::color_of(&e.expr))),
-        )
+        .chain(ctx.theme.colors.iter().map(|(n, e)| (n.clone(), e.color())))
         .collect();
 
     for (name, rgb) in color_names {
@@ -2255,6 +2734,8 @@ pub fn catalog(ctx: &Context) -> Vec<Entry> {
             "bg",
             "text",
             "border",
+            "stroke",
+            "text-stroke",
             "from",
             "via",
             "to",
@@ -2286,7 +2767,7 @@ mod tests {
     fn theme_colors_fonts_and_classes_copy_their_expressions() {
         let ctx = Context {
             fonts: Fonts::default(),
-            theme: theme::parse(
+            theme: crate::theme::parse(
                 "local purple = Color3.fromRGB(138, 61, 245)\nreturn {\n    colors = { brand = purple },\n    fonts = { title = Font.new(\"rbxasset://fonts/families/Montserrat.json\", Enum.FontWeight.Bold) },\n    classes = { card = \"bg-brand rounded-xl\", glow = { ZIndex = 2 } },\n}\n",
             ),
         };
@@ -2407,6 +2888,53 @@ mod tests {
             &r.problems[0].1,
             Problem::WrongElement(n, Needs::Text) if n == "TextColor3"
         ));
+    }
+
+    #[test]
+    fn roblox_properties_have_their_own_words() {
+        let r = resolved(
+            "TextButton",
+            "bg-transparency-50 stroke-2 stroke-red-500 stroke-transparency-25 text-stroke-black text-size-18 anchor-center auto-color",
+        );
+        assert!(
+            r.props
+                .contains(&("BackgroundTransparency".into(), "0.5".into()))
+        );
+        assert!(
+            r.props
+                .contains(&("TextStrokeColor3".into(), "Color3.fromRGB(0, 0, 0)".into()))
+        );
+        assert!(
+            r.props
+                .contains(&("TextStrokeTransparency".into(), "0".into()))
+        );
+        assert!(r.props.contains(&("TextSize".into(), "18".into())));
+        assert!(
+            r.props
+                .contains(&("AnchorPoint".into(), "Vector2.new(0.5, 0.5)".into()))
+        );
+        assert!(r.props.contains(&("AutoButtonColor".into(), "true".into())));
+        let stroke = r.children.iter().find(|c| c.class == "UIStroke").unwrap();
+        assert!(stroke.props.contains(&("Thickness".into(), "2".into())));
+        assert!(
+            stroke
+                .props
+                .contains(&("Transparency".into(), "0.25".into()))
+        );
+        assert!(r.problems.is_empty(), "{:?}", r.problems);
+        let s = resolved(
+            "ScrollingFrame",
+            "scroll-y canvas-auto canvas-h-400 no-elastic scrollbar-4",
+        );
+        assert!(
+            s.props
+                .contains(&("CanvasSize".into(), "UDim2.new(0, 0, 0, 400)".into()))
+        );
+        assert!(
+            s.props
+                .contains(&("AutomaticCanvasSize".into(), "Enum.AutomaticSize.Y".into()))
+        );
+        assert!(s.problems.is_empty(), "{:?}", s.problems);
     }
 
     #[test]
