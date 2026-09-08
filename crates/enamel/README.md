@@ -36,7 +36,18 @@ connects `MouseEnter` and `MouseLeave`.
 | `object-cover`, `object-contain` | `ScaleType` |
 | `overflow-hidden`, `overflow-scroll`, `scrollbar-*` | `ClipsDescendants`, `ScrollingEnabled`, `ScrollBarThickness` |
 | `hover:`, `active:`, `focus:`, `group`, `group-hover:` | the state helper |
+| `transition`, `transition-colors`, `duration-300`, `duration-[0.3s]`, `ease-out`, `ease-back-in`, `delay-100` | a TweenService tween on each state change |
 | `w-[200px]`, `bg-[#ff0000]`, `text-[14px]` | arbitrary values |
+
+A `transition` makes each state change a tween: 150ms, Quad in-out,
+over the colors, the transparencies, position, size, and rotation.
+`transition-colors`, `transition-opacity`, `transition-transform`, and
+`transition-all` narrow or widen that. `duration-*` and `delay-*` take
+milliseconds, or a bracket time with a unit, `[0.3s]`. `ease-*` names a
+Roblox easing style, `ease-back`, `ease-bounce`, `ease-expo`, with
+`-in`, `-out`, or `-in-out` behind it; `ease-in`, `ease-out`, and
+`ease-in-out` are Quad. A property a tween cannot move, a font or a
+boolean, is set at once.
 
 A margin, a shadow, or a cursor has no property on a GuiObject: the
 class parses and the `no_effect` lint says so. A text utility on a

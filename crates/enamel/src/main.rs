@@ -356,10 +356,41 @@ impl Handler for Enamel {
         let prefix = typed.rfind(':').map_or("", |i| &typed[..=i]);
         let span = (s as u32, e as u32);
 
-        Ok(self
-            .catalog
-            .iter()
-            .map(|(name, summary, color)| {
+        // A state prefix is an item of its own, so `hov` offers `hover:`
+        // before the colon is typed. Behind a state only the last one
+        // counts, so none is offered there.
+        let states = [
+            (
+                "hover:",
+                "the properties apply while the pointer is over the element",
+            ),
+            (
+                "active:",
+                "the properties apply while the button is pressed",
+            ),
+            (
+                "focus:",
+                "the properties apply while the text box has focus",
+            ),
+            (
+                "group-hover:",
+                "the properties apply while the pointer is over the nearest `group` above",
+            ),
+        ]
+        .into_iter()
+        .filter(|_| prefix.is_empty())
+        .map(|(state, summary)| {
+            let label = format!("{prefix}{state}");
+
+            CompletionItem::new(label.clone())
+                .detail(summary)
+                .kind(ItemKind::Keyword)
+                .over(span)
+                .insert(label)
+        });
+
+        Ok(states
+            .chain(self.catalog.iter().map(|(name, summary, color)| {
                 let label = format!("{prefix}{name}");
                 let mut item = CompletionItem::new(label.clone())
                     .detail(summary.clone())
@@ -377,7 +408,7 @@ impl Handler for Enamel {
                 }
 
                 item
-            })
+            }))
             .collect())
     }
 

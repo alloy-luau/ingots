@@ -245,6 +245,14 @@ pub enum Piece {
     FlexItem(&'static str, String),
     /// `group`: the element marks itself for `group-hover:` below it.
     Group,
+    /// `transition-colors`: what a state change tweens.
+    Transition(&'static str),
+    /// `duration-300`: the tween's seconds.
+    Duration(f64),
+    /// `ease-out`: the tween's easing style and direction.
+    Ease(&'static str, &'static str),
+    /// `delay-100`: the tween's delay, in seconds.
+    Delay(f64),
     /// A value of the theme file: the file needs the prelude.
     Theme,
     /// A utility Roblox has no property for.
@@ -305,6 +313,59 @@ fn spacing(word: &str) -> Option<f64> {
     }
 
     word.parse::<f64>().ok().map(|n| n * 4.0)
+}
+
+/// A time in seconds: `300` and `[300ms]` are milliseconds, `[0.3s]`
+/// seconds.
+fn seconds(word: &str) -> Option<f64> {
+    let inner = arbitrary(word).unwrap_or(word);
+
+    if let Some(ms) = inner.strip_suffix("ms") {
+        return ms.parse::<f64>().ok().map(|n| n / 1000.0);
+    }
+
+    if let Some(secs) = inner.strip_suffix('s') {
+        return secs.parse::<f64>().ok();
+    }
+
+    inner.parse::<f64>().ok().map(|n| n / 1000.0)
+}
+
+/// An easing word as a Roblox style and direction: `in-out` is Quad,
+/// `back` is Back going out, `back-in` Back going in.
+fn easing(word: &str) -> Option<(&'static str, &'static str)> {
+    match word {
+        "linear" => return Some(("Linear", "InOut")),
+        "in" => return Some(("Quad", "In")),
+        "out" => return Some(("Quad", "Out")),
+        "in-out" => return Some(("Quad", "InOut")),
+        _ => {}
+    }
+
+    let (style, direction) = if let Some(s) = word.strip_suffix("-in-out") {
+        (s, "InOut")
+    } else if let Some(s) = word.strip_suffix("-in") {
+        (s, "In")
+    } else if let Some(s) = word.strip_suffix("-out") {
+        (s, "Out")
+    } else {
+        (word, "Out")
+    };
+    let style = match style {
+        "sine" => "Sine",
+        "quad" => "Quad",
+        "cubic" => "Cubic",
+        "quart" => "Quart",
+        "quint" => "Quint",
+        "back" => "Back",
+        "bounce" => "Bounce",
+        "elastic" => "Elastic",
+        "expo" => "Exponential",
+        "circ" => "Circular",
+        _ => return None,
+    };
+
+    Some((style, direction))
 }
 
 /// A fraction or a word that names a scale: `1/2`, `full`, `screen`.
@@ -414,8 +475,16 @@ pub fn color(word: &str, theme: &Theme) -> Option<ColorValue> {
     }
 
     if let Some(entry) = theme.colors.get(name) {
+        // A theme color written as a string, `gold = "#ffd08a"`, is a
+        // hex the property cannot take as written.
+        let expr = if crate::theme::string_literal(&entry.expr).is_some() {
+            format!("Color3.fromHex({})", entry.expr)
+        } else {
+            entry.expr.clone()
+        };
+
         return Some(ColorValue {
-            expr: entry.expr.clone(),
+            expr,
             rgb: entry.color(),
             alpha,
         });
@@ -1005,6 +1074,10 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
             vec![Piece::Group],
             "marks the element for `group-hover:` on its descendants",
         )),
+        "transition" => Some(utility(
+            vec![Piece::Transition("default")],
+            "a state change tweens colors, transparencies, position, size, and rotation, 150ms ease-in-out unless `duration-*` and `ease-*` say otherwise",
+        )),
         "order-first" => Some(utility(
             vec![prop("LayoutOrder", "-9999", Needs::Gui)],
             "first in the layout",
@@ -1314,6 +1387,50 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
         .or_else(|| base.split_once('-'))?;
 
     match head {
+        "transition" => {
+            let (kind, what) = match rest {
+                "all" => ("all", "every property a tween can move"),
+                "colors" => ("colors", "the colors"),
+                "opacity" => ("opacity", "the transparencies"),
+                "transform" => ("transform", "position, size, anchor, and rotation"),
+                "none" => (
+                    "none",
+                    "nothing: a state change sets its properties at once",
+                ),
+                _ => return None,
+            };
+
+            Some(utility(
+                vec![Piece::Transition(kind)],
+                format!("a state change tweens {what}"),
+            ))
+        }
+        "duration" => {
+            let secs = seconds(rest)?;
+
+            Some(utility(
+                vec![Piece::Duration(secs)],
+                format!("a state change tweens over {}s", num(secs)),
+            ))
+        }
+        "delay" => {
+            let secs = seconds(rest)?;
+
+            Some(utility(
+                vec![Piece::Delay(secs)],
+                format!("a state change waits {}s before its tween", num(secs)),
+            ))
+        }
+        "ease" => {
+            let (style, direction) = easing(rest)?;
+
+            Some(utility(
+                vec![Piece::Ease(style, direction)],
+                format!(
+                    "a state change tweens with Enum.EasingStyle.{style}, Enum.EasingDirection.{direction}"
+                ),
+            ))
+        }
         "bg-transparency"
         | "bg-opacity"
         | "text-transparency"
@@ -1895,13 +2012,11 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
             ))
         }
         "shadow" | "drop" | "blur" | "brightness" | "contrast" | "cursor" | "tracking"
-        | "decoration" | "transition" | "duration" | "ease" | "delay" | "animate" | "backdrop"
-        | "will" | "touch" | "resize" | "list" | "divide" | "outline-offset" | "ring-offset"
-        | "content" | "float" | "clear" | "columns" | "break" | "box" | "isolate" | "mix"
-        | "table" | "caption" | "appearance" | "accent" | "caret" | "scroll" | "snap"
-        | "indent" | "align" | "whitespace" | "hyphens" | "sr" => {
-            no("this utility has no property on a Roblox instance")
-        }
+        | "decoration" | "animate" | "backdrop" | "will" | "touch" | "resize" | "list"
+        | "divide" | "outline-offset" | "ring-offset" | "content" | "float" | "clear"
+        | "columns" | "break" | "box" | "isolate" | "mix" | "table" | "caption" | "appearance"
+        | "accent" | "caret" | "scroll" | "snap" | "indent" | "align" | "whitespace"
+        | "hyphens" | "sr" => no("this utility has no property on a Roblox instance"),
         _ => None,
     }
 }
@@ -1945,11 +2060,40 @@ pub struct Resolved {
     /// The properties of each state, `hover` and the rest.
     pub states: BTreeMap<&'static str, Vec<(String, String)>>,
     pub group: bool,
+    /// The tween a state change plays, from `transition` and its
+    /// settings.
+    pub transition: Option<Transition>,
     /// Whether a value of the theme file is in use, so the file needs
     /// the theme's prelude.
     pub uses_theme: bool,
     /// Problems by class index.
     pub problems: Vec<(usize, Problem)>,
+}
+
+/// The tween of a state change.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Transition {
+    /// What tweens: `default`, `all`, `colors`, `opacity`, or
+    /// `transform`.
+    pub kind: &'static str,
+    pub duration: f64,
+    pub style: &'static str,
+    pub direction: &'static str,
+    pub delay: f64,
+}
+
+impl Transition {
+    /// The table the state helper takes.
+    pub fn luau(&self) -> String {
+        format!(
+            "{{ kind = \"{}\", info = TweenInfo.new({}, Enum.EasingStyle.{}, Enum.EasingDirection.{}, 0, false, {}) }}",
+            self.kind,
+            num(self.duration),
+            self.style,
+            self.direction,
+            num(self.delay)
+        )
+    }
 }
 
 /// Combines the classes of one element.
@@ -1976,6 +2120,10 @@ pub fn resolve(element: Element, classes: &[Class], ctx: &Context) -> Resolved {
     let mut flex: BTreeMap<&'static str, String> = BTreeMap::new();
     let mut font: BTreeMap<&'static str, String> = BTreeMap::new();
     let mut state_fonts: BTreeMap<&'static str, BTreeMap<&'static str, String>> = BTreeMap::new();
+    let mut transition = None;
+    let mut duration = None;
+    let mut ease = None;
+    let mut delay = None;
 
     for (i, class) in classes.iter().enumerate() {
         if let Some(v) = &class.unknown_variant {
@@ -2075,6 +2223,10 @@ pub fn resolve(element: Element, classes: &[Class], ctx: &Context) -> Resolved {
                     flex.insert(k, v);
                 }
                 Piece::Group => out.group = true,
+                Piece::Transition(kind) => transition = Some(kind),
+                Piece::Duration(secs) => duration = Some(secs),
+                Piece::Ease(style, direction) => ease = Some((style, direction)),
+                Piece::Delay(secs) => delay = Some(secs),
                 Piece::Theme => out.uses_theme = true,
                 Piece::NoEffect(what) => out.problems.push((i, Problem::NoEffect(what))),
             }
@@ -2092,6 +2244,25 @@ pub fn resolve(element: Element, classes: &[Class], ctx: &Context) -> Resolved {
             out.problems
                 .push((i, Problem::WrongElement(name.clone(), *needs)));
         }
+    }
+
+    // A duration, an easing, or a delay alone implies `transition`.
+    let kind = match transition {
+        Some("none") => None,
+        Some(kind) => Some(kind),
+        None if duration.is_some() || ease.is_some() || delay.is_some() => Some("default"),
+        None => None,
+    };
+
+    if let Some(kind) = kind {
+        let (style, direction) = ease.unwrap_or(("Quad", "InOut"));
+        out.transition = Some(Transition {
+            kind,
+            duration: duration.unwrap_or(0.15),
+            style,
+            direction,
+            delay: delay.unwrap_or(0.0),
+        });
     }
 
     let gui = element.is_gui_object();
@@ -2626,6 +2797,40 @@ pub fn catalog(ctx: &Context) -> Vec<Entry> {
         "pointer-events-auto",
         "select-none",
         "group",
+        "transition",
+        "transition-all",
+        "transition-colors",
+        "transition-opacity",
+        "transition-transform",
+        "transition-none",
+        "duration-75",
+        "duration-100",
+        "duration-150",
+        "duration-200",
+        "duration-300",
+        "duration-500",
+        "duration-700",
+        "duration-1000",
+        "delay-75",
+        "delay-100",
+        "delay-150",
+        "delay-200",
+        "delay-300",
+        "delay-500",
+        "ease-linear",
+        "ease-in",
+        "ease-out",
+        "ease-in-out",
+        "ease-sine",
+        "ease-quad",
+        "ease-cubic",
+        "ease-quart",
+        "ease-quint",
+        "ease-back",
+        "ease-bounce",
+        "ease-elastic",
+        "ease-expo",
+        "ease-circ",
         "order-first",
         "order-last",
         "w-full",
@@ -2810,6 +3015,42 @@ mod tests {
         let cs: Vec<Class> = classes.split_whitespace().map(Class::parse).collect();
 
         resolve(Element::parse(tag).unwrap(), &cs, &Context::default())
+    }
+
+    #[test]
+    fn a_transition_reads_its_time_and_easing() {
+        let r = resolved("TextButton", "transition hover:bg-red-600");
+        let t = r.transition.expect("transition");
+        assert_eq!(
+            (t.kind, t.duration, t.style, t.direction, t.delay),
+            ("default", 0.15, "Quad", "InOut", 0.0)
+        );
+
+        let r = resolved(
+            "TextButton",
+            "transition-colors duration-[300ms] ease-back-in delay-[0.1s]",
+        );
+        let t = r.transition.expect("transition");
+        assert_eq!(
+            (t.kind, t.duration, t.style, t.direction, t.delay),
+            ("colors", 0.3, "Back", "In", 0.1)
+        );
+        assert_eq!(
+            t.luau(),
+            "{ kind = \"colors\", info = TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In, 0, false, 0.1) }"
+        );
+
+        // A time alone implies the transition; `none` turns it off.
+        assert!(resolved("Frame", "duration-500").transition.is_some());
+        assert!(
+            resolved("Frame", "transition-none duration-500")
+                .transition
+                .is_none()
+        );
+        assert_eq!(seconds("[2s]"), Some(2.0));
+        assert_eq!(easing("elastic"), Some(("Elastic", "Out")));
+        assert_eq!(easing("expo-in-out"), Some(("Exponential", "InOut")));
+        assert_eq!(easing("wobble"), None);
     }
 
     #[test]

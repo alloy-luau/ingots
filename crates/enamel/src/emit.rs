@@ -115,11 +115,16 @@ impl Plan<'_> {
 
         if self.uses_helper() {
             let group = if self.resolved.group { "true" } else { "false" };
+            let tween = self
+                .resolved
+                .transition
+                .as_ref()
+                .map_or(String::new(), |t| format!(", {}", t.luau()));
             let (open, close) = if f.in_children { ("{", "}") } else { ("", "") };
             edits.push(Edit::insert(f.start as u32, format!("{open}{helper}(")));
             edits.push(Edit::insert(
                 f.end as u32,
-                format!(", {}, {group}){close}", self.states_table()),
+                format!(", {}, {group}{tween}){close}", self.states_table()),
             ));
         }
 
@@ -130,10 +135,11 @@ impl Plan<'_> {
 /// The helper as one line of Alloy, so the file keeps its line count.
 pub fn helper_text(helper: &str) -> String {
     format!(
-        "local function {helper}(el: any, states: {{ hover: {{ [string]: any }}?, active: {{ [string]: any }}?, focus: {{ [string]: any }}?, group_hover: {{ [string]: any }}? }}, group: boolean): any \
+        "local function {helper}(el: any, states: {{ hover: {{ [string]: any }}?, active: {{ [string]: any }}?, focus: {{ [string]: any }}?, group_hover: {{ [string]: any }}? }}, group: boolean, tween: {{ kind: string, info: TweenInfo }}?): any \
 local base: {{ [string]: any }} = {{}} \
 for _, props in states :: {{ [string]: {{ [string]: any }} }} do for k in props do if base[k] == nil then base[k] = el[k] end end end \
-local function apply(props: {{ [string]: any }}) for k, v in props do el[k] = v end end \
+local function tweens(kind: string, k: string, v: any): boolean local t = typeof(v) if t ~= \"number\" and t ~= \"Color3\" and t ~= \"UDim2\" and t ~= \"UDim\" and t ~= \"Vector2\" and t ~= \"Vector3\" and t ~= \"Rect\" then return false end if kind == \"all\" then return true end local color = string.sub(k, -6) == \"Color3\" local opacity = string.sub(k, -12) == \"Transparency\" local transform = k == \"Position\" or k == \"Size\" or k == \"Rotation\" or k == \"AnchorPoint\" if kind == \"colors\" then return color elseif kind == \"opacity\" then return opacity elseif kind == \"transform\" then return transform end return color or opacity or transform end \
+local function apply(props: {{ [string]: any }}) local tw = tween if tw == nil then for k, v in props do el[k] = v end return end local goal: {{ [string]: any }} = {{}} local moving = false for k, v in props do if tweens(tw.kind, k, v) then goal[k] = v moving = true else el[k] = v end end if moving then game:GetService(\"TweenService\"):Create(el, tw.info, goal):Play() end end \
 local function reset() apply(base) end \
 local hover = states.hover if hover ~= nil then local h = hover el.MouseEnter:Connect(function() apply(h) end) el.MouseLeave:Connect(reset) end \
 local active = states.active if active ~= nil then local a = active el.MouseButton1Down:Connect(function() apply(a) end) el.MouseButton1Up:Connect(function() if hover ~= nil then apply(hover) else reset() end end) end \
@@ -196,6 +202,16 @@ mod tests {
             out,
             "local x = <Frame BackgroundColor3={Color3.fromRGB(239, 68, 68)} Name=\"a\" ><UIListLayout FillDirection={Enum.FillDirection.Horizontal} SortOrder={Enum.SortOrder.LayoutOrder} Padding={UDim.new(0, 8)} /><UICorner CornerRadius={UDim.new(0, 4)} /></Frame>\n"
         );
+    }
+
+    #[test]
+    fn a_transition_rides_along_as_the_tween() {
+        let src = "return (\n    <Frame>\n        <TextButton ClassName=\"bg-red-500 hover:bg-red-600 transition duration-300\">Go</TextButton>\n    </Frame>\n)\n";
+        let found = markup::find(src);
+        let plan = plan(&found[0], &Context::default());
+        let out = apply(src, &plan.edits("__enamel"));
+        assert!(out.contains(", false, { kind = \"default\", info = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut, 0, false, 0) })}"), "{out}");
+        assert!(helper_text("__enamel").contains("TweenService"));
     }
 
     #[test]

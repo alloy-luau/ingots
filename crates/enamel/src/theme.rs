@@ -400,7 +400,7 @@ fn valid_name(name: &str) -> bool {
 }
 
 /// The inside of a plain string literal, `"..."` or `'...'`.
-fn string_literal(expr: &str) -> Option<String> {
+pub fn string_literal(expr: &str) -> Option<String> {
     let q = expr.chars().next()?;
 
     if (q == '"' || q == '\'') && expr.ends_with(q) && expr.len() >= 2 {
