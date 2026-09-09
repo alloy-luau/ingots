@@ -2706,6 +2706,162 @@ pub type Rgb = (u8, u8, u8);
 /// utility names one.
 pub type Entry = (String, String, Option<Rgb>);
 
+/// The heads that take a number, `w-16`, `gap-2`, `duration-300`. Each
+/// names a scale with no end, so the items behind one come from the
+/// digits the user types; a fixed list would hold `w-1` and hide
+/// `w-11`.
+pub const SCALE_HEADS: &[&str] = &[
+    "w",
+    "h",
+    "size",
+    "min-w",
+    "min-h",
+    "max-w",
+    "max-h",
+    "p",
+    "px",
+    "py",
+    "pt",
+    "pr",
+    "pb",
+    "pl",
+    "gap",
+    "gap-x",
+    "gap-y",
+    "top",
+    "left",
+    "right",
+    "bottom",
+    "translate-x",
+    "translate-y",
+    "z",
+    "order",
+    "opacity",
+    "rotate",
+    "scale",
+    "grid-cols",
+    "auto-rows",
+    "leading",
+    "border",
+    "stroke",
+    "text-size",
+    "duration",
+    "delay",
+    "scrollbar",
+    "canvas-h",
+    "canvas-w",
+    "max-graphemes",
+    "transparency",
+    "bg-transparency",
+    "text-transparency",
+    "image-transparency",
+    "group-transparency",
+    "stroke-transparency",
+    "text-stroke-transparency",
+];
+
+/// The denominators Tailwind's fractions use.
+const DENOMINATORS: &[u32] = &[2, 3, 4, 5, 6, 12];
+
+/// The head and the number a typed word names, when a scale head owns
+/// it: `w-1` gives `("w", "1")`, `w-1/2` gives `("w", "1/2")`.
+fn scale_tail(typed: &str) -> Option<(&'static str, &str)> {
+    let word = typed.strip_prefix('-').unwrap_or(typed);
+    let mut best: Option<(&'static str, &str)> = None;
+
+    for head in SCALE_HEADS {
+        let Some(rest) = word.strip_prefix(head).and_then(|r| r.strip_prefix('-')) else {
+            continue;
+        };
+        let (num, den) = match rest.split_once('/') {
+            Some((n, d)) => (n, d),
+
+            None => (rest, ""),
+        };
+
+        if num.is_empty()
+            || !num.bytes().all(|b| b.is_ascii_digit())
+            || !den.bytes().all(|b| b.is_ascii_digit())
+        {
+            continue;
+        }
+
+        // `text-size-14` and `text-14` both start with `text`; the
+        // longer head is the one the user is typing.
+        if best.is_none_or(|(b, _)| b.len() < head.len()) {
+            best = Some((head, rest));
+        }
+    }
+
+    best
+}
+
+/// Whether the list behind a typed word grows with the word. The editor
+/// caches a list it is told is whole and filters that itself, which
+/// hides every step a fixed list leaves out.
+pub fn takes_a_number(typed: &str) -> bool {
+    let word = typed.strip_prefix('-').unwrap_or(typed);
+
+    word.is_empty()
+        || scale_tail(typed).is_some()
+        || SCALE_HEADS
+            .iter()
+            .any(|h| h.starts_with(word) || *h == word.trim_end_matches('-'))
+}
+
+/// The utilities a typed word names when it ends in a number: the number
+/// itself, every number that carries it, and the fractions. The steps
+/// are Tailwind's and have no end, so the entries come from the digits
+/// rather than from a list. A word with no number gives nothing, and the
+/// static catalog answers it.
+pub fn expand(typed: &str, ctx: &Context) -> Vec<Entry> {
+    let Some((head, rest)) = scale_tail(typed) else {
+        return Vec::new();
+    };
+    let sign = if typed.starts_with('-') { "-" } else { "" };
+    let mut names = vec![format!("{sign}{head}-{rest}")];
+
+    match rest.split_once('/') {
+        // A fraction: the denominators the digits so far allow.
+        Some((num, den)) => {
+            for d in DENOMINATORS
+                .iter()
+                .filter(|d| d.to_string().starts_with(den))
+            {
+                names.push(format!("{sign}{head}-{num}/{d}"));
+            }
+        }
+
+        None => {
+            for d in 0..=9 {
+                names.push(format!("{sign}{head}-{rest}{d}"));
+            }
+
+            for d in DENOMINATORS {
+                names.push(format!("{sign}{head}-{rest}/{d}"));
+            }
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+
+    names
+        .into_iter()
+        .filter(|n| seen.insert(n.clone()))
+        .filter_map(|n| {
+            let u = parse(&Class::parse(&n), ctx)?;
+
+            // A margin parses and sets nothing. The static catalog
+            // leaves those out and so does this list.
+            if u.pieces.iter().all(|p| matches!(p, Piece::NoEffect(_))) {
+                return None;
+            }
+
+            Some((n, u.summary, None))
+        })
+        .collect()
+}
+
 /// Every utility name Enamel completes, with a summary and a color when
 /// the utility names one. Sizes and spacings list a few common steps.
 pub fn catalog(ctx: &Context) -> Vec<Entry> {
@@ -3015,6 +3171,70 @@ mod tests {
         let cs: Vec<Class> = classes.split_whitespace().map(Class::parse).collect();
 
         resolve(Element::parse(tag).unwrap(), &cs, &Context::default())
+    }
+
+    /// A scale has no end, so the list behind a number comes from the
+    /// digits typed. The fixed steps hold `w-1` and `w-10`; `w-11` is
+    /// only here.
+    #[test]
+    fn a_number_grows_the_list_it_names() {
+        let ctx = Context::default();
+        let names = |typed: &str| {
+            expand(typed, &ctx)
+                .into_iter()
+                .map(|(n, _, _)| n)
+                .collect::<Vec<_>>()
+        };
+        let w = names("w-1");
+
+        assert_eq!(w[0], "w-1");
+        assert!(w.contains(&"w-11".to_string()), "{w:?}");
+        assert!(w.contains(&"w-19".to_string()), "{w:?}");
+        assert!(w.contains(&"w-1/2".to_string()), "{w:?}");
+        assert!(w.contains(&"w-1/3".to_string()), "{w:?}");
+        assert_eq!(expand("w-1", &ctx)[0].1, "width 4 pixels");
+        assert_eq!(expand("w-16", &ctx)[0].1, "width 64 pixels");
+
+        // The other heads the number reaches.
+        assert!(names("p-1").contains(&"p-11".to_string()));
+        assert!(names("gap-2").contains(&"gap-24".to_string()));
+        assert!(names("text-size-1").contains(&"text-size-18".to_string()));
+        assert!(names("duration-3").contains(&"duration-30".to_string()));
+        assert!(names("bg-transparency-2").contains(&"bg-transparency-25".to_string()));
+
+        // A fraction narrows to the denominators the digits allow.
+        assert_eq!(
+            names("w-1/"),
+            ["w-1/2", "w-1/3", "w-1/4", "w-1/5", "w-1/6", "w-1/12"]
+        );
+        assert_eq!(names("w-1/1"), ["w-1/1", "w-1/12"]);
+        assert_eq!(names("-translate-x-1")[0], "-translate-x-1/2");
+
+        // A margin parses and sets nothing, so it stays out.
+        assert!(names("m-4").is_empty());
+        // A word with no number is the static catalog's alone.
+        assert!(names("flex").is_empty());
+        assert!(names("bg-red-5").is_empty());
+    }
+
+    /// The editor filters a list it is told is whole, so a list built
+    /// from the word being typed has to say it is not.
+    #[test]
+    fn a_scale_word_asks_the_ingot_again() {
+        assert!(takes_a_number(""));
+        assert!(takes_a_number("w"));
+        assert!(takes_a_number("w-"));
+        assert!(takes_a_number("w-1"));
+        assert!(takes_a_number("g"));
+        assert!(takes_a_number("gap-2"));
+        assert!(takes_a_number("text-"));
+        assert!(takes_a_number("-translate-x-1"));
+
+        // A fixed list: the editor may filter what it holds.
+        assert!(!takes_a_number("flex"));
+        assert!(!takes_a_number("rounded-l"));
+        assert!(!takes_a_number("bg-red-5"));
+        assert!(!takes_a_number("justify-c"));
     }
 
     #[test]

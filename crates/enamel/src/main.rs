@@ -15,8 +15,8 @@ mod palette;
 mod theme;
 
 use alloy_ingot::{
-    Color, ColorInfo, CompletionItem, Edit, File, Finding, Handler, Hover, ItemKind, Settings,
-    serve,
+    Color, ColorInfo, CompletionItem, Completions, Edit, File, Finding, Handler, Hover, ItemKind,
+    Settings, serve,
 };
 
 use classes::{Class, Context, Element, Problem};
@@ -341,19 +341,21 @@ impl Handler for Enamel {
         file: &File,
         offset: u32,
         _trigger: Option<&str>,
-    ) -> Result<Vec<CompletionItem>, String> {
+    ) -> Result<Completions, String> {
         if file.kind != "alx" {
-            return Ok(Vec::new());
+            return Ok(Completions::default());
         }
 
         self.sync_theme();
         let found = markup::find(&file.source);
         let Some((s, e)) = markup::string_at(&found, &file.source, offset as usize) else {
-            return Ok(Vec::new());
+            return Ok(Completions::default());
         };
         // The variants typed so far stay in front of every item.
         let typed = &file.source[s..(offset as usize).max(s)];
         let prefix = typed.rfind(':').map_or("", |i| &typed[..=i]);
+        // The word behind the variants: the one the scale reads.
+        let base = &typed[prefix.len()..];
         let span = (s as u32, e as u32);
 
         // A state prefix is an item of its own, so `hov` offers `hover:`
@@ -389,27 +391,41 @@ impl Handler for Enamel {
                 .insert(label)
         });
 
-        Ok(states
-            .chain(self.catalog.iter().map(|(name, summary, color)| {
-                let label = format!("{prefix}{name}");
-                let mut item = CompletionItem::new(label.clone())
-                    .detail(summary.clone())
-                    .over(span)
-                    .insert(label);
+        // A scale has no end: `w-1` names `w-1`, `w-10`, `w-11`, and the
+        // fractions, none of which a fixed list can hold. The entries
+        // come from the digits typed, and the static ones behind them.
+        let grown = classes::expand(base, &self.ctx);
+        let made: std::collections::HashSet<&str> =
+            grown.iter().map(|(n, _, _)| n.as_str()).collect();
+        let rest = self
+            .catalog
+            .iter()
+            .filter(|(n, _, _)| !made.contains(n.as_str()));
+        let item = |(name, summary, color): &classes::Entry| {
+            let label = format!("{prefix}{name}");
+            let mut out = CompletionItem::new(label.clone())
+                .detail(summary.clone())
+                .over(span)
+                .insert(label);
 
-                if let Some(c) = color {
-                    let hex = palette::hex(*c);
-                    item = item
-                        .kind(ItemKind::Color)
-                        .detail(hex.clone())
-                        .documentation(hex);
-                } else {
-                    item = item.kind(ItemKind::Property);
-                }
+            if let Some(c) = color {
+                let hex = palette::hex(*c);
+                out = out
+                    .kind(ItemKind::Color)
+                    .detail(hex.clone())
+                    .documentation(hex);
+            } else {
+                out = out.kind(ItemKind::Property);
+            }
 
-                item
-            }))
-            .collect())
+            out
+        };
+        let items: Vec<CompletionItem> = states
+            .chain(grown.iter().map(&item))
+            .chain(rest.map(&item))
+            .collect();
+
+        Ok(Completions::new(items).incomplete(classes::takes_a_number(base)))
     }
 
     fn colors(&mut self, file: &File) -> Result<Vec<ColorInfo>, String> {

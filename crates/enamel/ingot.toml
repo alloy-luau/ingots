@@ -5,6 +5,9 @@ binary = "../../target/release/enamel"
 run = "first"
 hooks = ["transform", "lint", "hover", "complete", "colors"]
 
+[props]
+ClassName = { doc = "The utility classes of the element: `flex gap-2 bg-red-500 rounded-lg`. Enamel turns them into Roblox properties and layout children at compile time. Hover on a class to see what it sets.", insert = "ClassName=\"$1\"" }
+
 [options]
 font_sans = { default = "rbxasset://fonts/families/GothamSSm.json", doc = "The font family `font-sans` names, and the one text takes with no family class." }
 font_serif = { default = "rbxasset://fonts/families/Merriweather.json", doc = "The font family `font-serif` names." }

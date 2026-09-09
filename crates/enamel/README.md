@@ -54,9 +54,17 @@ class parses and the `no_effect` lint says so. A text utility on a
 `Frame` gets `wrong_element`. `ClassName` on a component gets
 `not_an_element`, which fails the build by default.
 
-In the editor, hover on a class shows what it sets, completion lists
-every utility with a swatch beside each color, and a color class shows
-its swatch in the text.
+In the editor, `ClassName` completes as a prop name on any GUI tag, the
+way a Roblox property does; hover on a class shows what it sets;
+completion lists every utility with a swatch beside each color; and a
+color class shows its swatch in the text.
+
+A scale has no end, so the list behind a number comes from the digits
+typed: `w-1` offers `w-1`, `w-10` through `w-19`, and `w-1/2` through
+`w-1/12`, each with the size it sets. `p-`, `gap-`, `z-`, `opacity-`,
+`duration-`, `text-size-`, and the other heads that take a number work
+the same. A name with no number, `rounded-`, `bg-red-`, keeps its fixed
+list.
 
 ## Roblox properties by name
 
