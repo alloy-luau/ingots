@@ -1,0 +1,16 @@
+[package]
+name = "silk"
+version = "0.1.0"
+description = "HTML and CSS for Alloy markup, the React way: HTML elements become Roblox instances, and a <style> becomes a StyleSheet"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+alloy-ingot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

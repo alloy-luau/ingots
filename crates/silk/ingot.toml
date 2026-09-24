@@ -1,0 +1,83 @@
+name = "silk"
+api = 1
+description = "HTML and CSS in .alx, the React way: `<div>`, `<p>`, and `<button>` become Roblox instances, attributes become properties, and `<style>` becomes a StyleSheet."
+binary = "../../target/release/silk"
+# Before Enamel, which runs "first" (-100): Enamel then reads the
+# `ClassName` that Silk writes from `className`.
+run = -200
+kinds = ["alx"]
+hooks = ["transform", "lint", "hover", "complete", "colors"]
+
+[options]
+roblox = { default = true, doc = "Whether Roblox classes and properties may stand beside the HTML: `<Frame>`, `BackgroundColor3={...}`, and Roblox names in CSS. With `false`, each one is a `roblox_instance` error and leaves completion." }
+tags = { default = true, doc = "Whether `className` becomes CollectionService tags, which `.class` selectors in a `<style>` match. The tags need a target whose elements are instances, as Vide and Fusion build them." }
+helper = { default = "__silk", doc = "The name of the helper the transform writes for tags, links, and style sheets. Change it when it collides with a name of yours." }
+font = { default = "rbxasset://fonts/families/SourceSansPro.json", doc = "The font family text takes by default, and `sans-serif` names." }
+font_serif = { default = "rbxasset://fonts/families/Merriweather.json", doc = "The font family `serif` names." }
+font_mono = { default = "rbxasset://fonts/families/RobotoMono.json", doc = "The font family `monospace` and `<code>` take." }
+color = { default = "#000000", doc = "The text color by default, as a CSS color." }
+
+[lints.unsupported_tag]
+default = "deny"
+summary = "an HTML element with no Roblox form"
+detail = "`<select>`, `<iframe>`, `<svg>`, a checkbox, and a few others have nothing behind them in Roblox. Build the control from buttons and frames."
+
+[lints.roblox_instance]
+default = "deny"
+summary = "a Roblox class or property, in a project that turns them off"
+detail = "`[ingot.silk] roblox = false` keeps the markup to HTML and CSS. Write the HTML element, the HTML attribute, or the CSS property instead."
+
+[lints.react_name]
+default = "deny"
+summary = "an HTML spelling React writes another way"
+detail = "Silk follows React: `className`, not `class`; `htmlFor`, `tabIndex`, `readOnly`; `onClick`, not `onclick`. The fix writes the React name."
+
+[lints.react_style]
+default = "deny"
+summary = "a `style` string, which React does not take"
+detail = "React takes `style` as a table of camel case properties: `style={{ backgroundColor = \"#fff\", padding = 8 }}`. A number is pixels. Real CSS goes in a `<style>` element."
+
+[lints.unknown_property]
+default = "warn"
+summary = "a CSS property Silk does not know"
+detail = "The property sets nothing. A typo, or a property with no Roblox counterpart."
+
+[lints.no_effect]
+default = "warn"
+summary = "CSS or an attribute with no effect on a Roblox instance"
+detail = "`margin`, `box-shadow`, `cursor`, `title`, and a few others parse and set nothing. A `gap` on the parent replaces a margin."
+
+[lints.bad_value]
+default = "warn"
+summary = "a CSS value the property does not take"
+detail = "The value does not parse as what the property takes: a color, a length, or one of its keywords."
+
+[lints.unsupported_css]
+default = "warn"
+summary = "CSS that a Roblox StyleRule cannot write"
+detail = "Roblox selectors match a class, a tag, a name, `:hover`, `:active`, and `:disabled`, joined by a child or a descendant. Sibling combinators, attribute selectors, most pseudo-classes, pseudo-elements, and at-rules have no form."
+
+[lints.css_syntax]
+default = "warn"
+summary = "CSS that does not parse"
+detail = "A block without its brace, or a selector without a block."
+
+[lints.dynamic_style]
+default = "warn"
+summary = "a `style` value Silk cannot read at compile time"
+detail = "Silk turns `style` into properties when it compiles. A value that is not a string or a number literal sets nothing; set the property as an attribute instead."
+
+[lints.link_out]
+default = "warn"
+summary = "a link to a web page"
+detail = "A Roblox game cannot open a URL. `href=\"#id\"` scrolls the ScrollingFrame that holds the element with that `id` to it."
+
+[lints.inline_link]
+default = "warn"
+summary = "a link inside text"
+detail = "Text with a link inside is RichText, and RichText takes no click. Put the link on its own, beside the text."
+
+[lints.scroll_height]
+default = "warn"
+summary = "a scrolling box with an automatic height"
+detail = "`overflow: auto` makes a ScrollingFrame. With no `height`, it grows with its content and never scrolls."
