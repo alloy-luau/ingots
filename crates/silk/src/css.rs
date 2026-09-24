@@ -99,7 +99,7 @@ pub fn parse_sheet(text: &str, base: usize) -> Sheet {
                 .map_or(end, |n| i + n);
             sheet.problems.push(Problem {
                 span: (base + i, base + head_end),
-                lint: "unsupported",
+                lint: "unsupported_css",
                 message: format!(
                     "`{}` has no Roblox form, so Silk skips the block",
                     &t[i..head_end]
@@ -234,18 +234,19 @@ fn parse_decls_clean(t: &str, base: usize) -> Vec<Decl> {
         let mut value = raw_value.trim();
         let mut important = false;
 
-        if let Some(v) = value.strip_suffix("!important") {
-            value = v.trim_end();
+        if value.to_ascii_lowercase().ends_with("!important") {
+            value = value[..value.len() - "!important".len()].trim_end();
             important = true;
         }
 
         let value_start = s + colon + 1 + raw_value.find(value).unwrap_or(0);
-        let lower =
-            match name.starts_with("--") || name.chars().next().is_some_and(char::is_uppercase) {
-                true => name.to_string(),
+        // CSS names are case blind; a Roblox property is written as
+        // itself, in PascalCase.
+        let lower = match name.starts_with("--") || is_roblox_name(name) {
+            true => name.to_string(),
 
-                false => name.to_ascii_lowercase(),
-            };
+            false => name.to_ascii_lowercase(),
+        };
 
         out.push(Decl {
             name: lower,
@@ -285,6 +286,14 @@ const UNITLESS: &[&str] = &[
     "z-index",
     "zoom",
 ];
+
+/// Whether a property name is a Roblox one: PascalCase, `BackgroundColor3`.
+/// A CSS name in capitals, `COLOR` or `Background-Color`, is not.
+pub fn is_roblox_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_uppercase())
+        && name.chars().any(|c| c.is_ascii_lowercase())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
 
 /// `backgroundColor` as `background-color`, and `WebkitTextStroke` as
 /// `-webkit-text-stroke`.
@@ -384,7 +393,16 @@ pub fn parse_table(text: &str, base: usize) -> (Vec<Decl>, Vec<Problem>) {
             .trim_end_matches(']')
             .trim()
             .trim_matches(|c| c == '"' || c == '\'');
-        let name = kebab(key);
+        // A Roblox property keeps its name; `WebkitTextStroke` is a
+        // vendor prefix.
+        let vendor = ["Webkit", "Moz", "Ms", "O"]
+            .iter()
+            .any(|p| key.strip_prefix(p).is_some_and(|r| r.starts_with(|c: char| c.is_ascii_uppercase())));
+        let name = match is_roblox_name(key) && !vendor {
+            true => key.to_string(),
+
+            false => kebab(key),
+        };
         let raw_value = &field[eq + 1..];
         let value = raw_value.trim();
         let value_at = s + eq + 1 + (raw_value.len() - raw_value.trim_start().len());

@@ -57,8 +57,60 @@ pub fn run(source: &str, path: &str, opts: &Options) -> Output {
     let markup = Markup::read(source);
     let mut w = Writer::new(source, path, &markup, opts);
     w.write();
+    let mut out = w.finish();
+    out.findings.extend(void_findings(source));
 
-    w.finish()
+    // An inherited declaration reports once, not once per text inside.
+    let mut seen = HashSet::new();
+    out.findings
+        .retain(|f| seen.insert((f.lint.clone(), f.span, f.message.clone())));
+
+    out
+}
+
+/// A void tag written the HTML way, `<br>`: React closes it itself,
+/// `<br />`, and the markup does not read without the slash.
+fn void_findings(src: &str) -> Vec<Finding> {
+    const VOID: &[&str] = &[
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
+        "source", "track", "wbr",
+    ];
+    let mut out = Vec::new();
+
+    for (lt, _) in src.match_indices('<') {
+        let rest = &src[lt + 1..];
+        let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+
+        if !VOID.contains(&name.as_str()) {
+            continue;
+        }
+
+        let line = &src[src[..lt].rfind('\n').map_or(0, |n| n + 1)..lt];
+
+        // A comment or a string on the line holds no tag.
+        if line.contains("--") || line.matches('"').count() % 2 == 1 {
+            continue;
+        }
+
+        let Some(gt) = rest.find('>').map(|n| lt + 1 + n) else {
+            continue;
+        };
+
+        if src[..gt].ends_with('/') || src[lt + 1..gt].contains('<') {
+            continue;
+        }
+
+        out.push(
+            Finding::new(
+                "void_tag",
+                (lt as u32, (gt + 1) as u32),
+                format!("React closes a void tag itself: write `<{name} ... />`"),
+            )
+            .with_fix(Edit::insert(gt as u32, " /")),
+        );
+    }
+
+    out
 }
 
 /// The CSS of every `<style>` element of a file, merged, for the editor
@@ -71,7 +123,7 @@ pub fn sheets(source: &str) -> Vec<(usize, Sheet)> {
         .enumerate()
         .filter(|(_, e)| e.name == "style")
         .filter_map(|(i, e)| {
-            e.inner()
+            e.css(source)
                 .map(|(s, t)| (i, css::parse_sheet(&source[s..t], s)))
         })
         .collect()
@@ -90,6 +142,10 @@ struct Writer<'a> {
     covered: Vec<bool>,
     /// The `LayoutOrder` a parent gives each child.
     order: HashMap<usize, usize>,
+    /// Elements whose children run in a row: a flex row, or a button
+    /// that holds an icon beside its text.
+    row_parents: HashSet<usize>,
+    uses_rich: bool,
     reps: Vec<(usize, usize, String)>,
     ins: Vec<(usize, i64, usize, String)>,
     seq: usize,
@@ -115,7 +171,7 @@ impl<'a> Writer<'a> {
 
         for (i, e) in m.elements.iter().enumerate() {
             if e.name == "style"
-                && let Some((s, t)) = e.inner()
+                && let Some((s, t)) = e.css(src)
             {
                 let sheet = css::parse_sheet(&src[s..t], s);
                 vars.extend(sheet.vars.clone());
@@ -134,6 +190,8 @@ impl<'a> Writer<'a> {
             foldable: vec![false; n],
             covered: vec![false; n],
             order: HashMap::new(),
+            row_parents: HashSet::new(),
+            uses_rich: false,
             reps: Vec::new(),
             ins: Vec::new(),
             seq: 0,
@@ -197,6 +255,10 @@ impl<'a> Writer<'a> {
 
         if self.uses_sheet {
             lead.push_str(&sheet_text(&self.opts.helper));
+        }
+
+        if self.uses_rich {
+            lead.push_str(&rich_text(&self.opts.helper));
         }
 
         if !lead.is_empty() {
@@ -325,9 +387,11 @@ impl<'a> Writer<'a> {
                 }
 
                 // A Roblox element among the children of a Silk box
-                // takes its place in the order too.
+                // takes its place in the order too. A component takes
+                // only the props it declares.
                 if let Some(k) = self.order.get(&i).copied()
                     && e.attr("LayoutOrder").is_none()
+                    && roblox::is_class(&e.name)
                 {
                     self.insert(e.name_span.1, RANK_TEXT, format!(" LayoutOrder={{{k}}}"));
                 }
@@ -365,7 +429,11 @@ impl<'a> Writer<'a> {
                 Kind::Group => self.group(i),
 
                 Kind::Input => {
-                    let kind = e.text(self.src, "type").unwrap_or("text");
+                    let kind = e
+                        .text(self.src, "type")
+                        .unwrap_or("text")
+                        .to_ascii_lowercase();
+                    let kind = kind.as_str();
 
                     if kind == "hidden" {
                         self.blank(i);
@@ -491,6 +559,25 @@ impl<'a> Writer<'a> {
         index: usize,
     ) -> Result<Vec<String>, String> {
         let last = sel.last().ok_or("an empty selector")?;
+
+        if !self.opts.roblox {
+            let named = sel.parts.iter().find_map(|(_, c)| {
+                c.tag
+                    .as_deref()
+                    .filter(|t| t.starts_with(|ch: char| ch.is_ascii_uppercase()))
+                    .or(c.pseudo_element.as_deref().filter(|p| p.starts_with(|ch: char| ch.is_ascii_uppercase())))
+            });
+
+            if let Some(name) = named {
+                self.find(
+                    "roblox_instance",
+                    sel.span,
+                    format!("`{name}` is a Roblox class, and this project turns Roblox names off"),
+                );
+
+                return Ok(Vec::new());
+            }
+        }
         let placeholder = last.pseudo_element.as_deref() == Some("placeholder");
         let roblox_sel = roblox_selector(sel, placeholder)?;
         let target = match &last.tag {
@@ -531,7 +618,7 @@ impl<'a> Writer<'a> {
             };
             let mut out = Out::default();
             props::apply(&group, &ctx, &mut out);
-            props::finish_colors(&mut out, target);
+            props::finish_colors(&mut out, target, true);
 
             for p in std::mem::take(&mut out.problems) {
                 self.find(p.lint, p.span, p.message);
@@ -563,7 +650,20 @@ impl<'a> Writer<'a> {
                 );
             }
 
-            if let Some((size, auto)) = out.size((Axis::Auto, Axis::Auto)) {
+            // An axis the rule leaves out takes the element's own: a box
+            // is as wide as its parent, and an inline tag sizes to its text.
+            let inline = last
+                .tag
+                .as_deref()
+                .and_then(html::tag)
+                .is_some_and(|t| matches!(t.kind, Kind::Inline | Kind::Button | Kind::Link | Kind::Input));
+            let base_width = match inline {
+                true => Axis::Auto,
+
+                false => Axis::Len(css::Len { scale: 1.0, offset: 0.0 }),
+            };
+
+            if let Some((size, auto)) = out.size((base_width, Axis::Auto)) {
                 out.set("Size", size);
                 out.set("AutomaticSize", auto);
             }
@@ -646,6 +746,9 @@ impl<'a> Writer<'a> {
                                         | "overflow-y"
                                         | "list-style"
                                         | "list-style-type"
+                                        | "flex-direction"
+                                        | "height"
+                                        | "max-height"
                                 )
                             })
                             .cloned(),
@@ -661,7 +764,8 @@ impl<'a> Writer<'a> {
     fn element(&mut self, i: usize, tag: &'static Tag) {
         let e = self.el(i);
         let src = self.src;
-        let input_type = e.text(src, "type");
+        let input_type_owned = e.text(src, "type").map(str::to_ascii_lowercase);
+        let input_type = input_type_owned.as_deref();
         let boxes = self.boxes(i);
         let holds_text = self.holds_text(i);
         let holes: Vec<(usize, usize)> = e
@@ -687,6 +791,19 @@ impl<'a> Writer<'a> {
 
         let demoted =
             matches!(tag.kind, Kind::Text | Kind::Cell | Kind::Inline) && kind == Kind::Block;
+        // A button or a link that holds a box, an icon beside its text,
+        // lays both out in a row.
+        let button_row = matches!(tag.kind, Kind::Button | Kind::Link) && !boxes.is_empty();
+        // Text beside a box stands in a TextLabel of its own, as a
+        // browser puts it in an anonymous box.
+        let wrap_runs = holds_text
+            && !boxes.is_empty()
+            && (demoted
+                || button_row
+                || matches!(
+                    kind,
+                    Kind::Block | Kind::List | Kind::Table | Kind::Row | Kind::Canvas
+                ));
         let clicks = e.attrs.iter().any(|a| {
             matches!(
                 html::event(&a.name).map(|(ev, _)| ev),
@@ -744,7 +861,9 @@ impl<'a> Writer<'a> {
             &mut statics,
         );
         let mut style = Out::default();
-        props::apply(&own_decls, &ctx, &mut style);
+        let mut decls = self.inherited(i);
+        decls.extend(own_decls.iter().cloned());
+        props::apply(&decls, &ctx, &mut style);
 
         for p in std::mem::take(&mut style.problems) {
             self.find(p.lint, p.span, p.message);
@@ -767,30 +886,31 @@ impl<'a> Writer<'a> {
             .flat_map(str::split_whitespace)
             .collect();
         let enamel = self.opts.enamel && !class_tokens.is_empty();
+        // A utility with a state variant applies on that state alone, so
+        // the element keeps the defaults for its resting look.
         let has = |prefixes: &[&str]| {
             enamel
                 && class_tokens.iter().any(|t| {
-                    let base = t.rsplit(':').next().unwrap_or(t);
-
-                    prefixes
-                        .iter()
-                        .any(|p| base == *p || base.starts_with(&format!("{p}-")))
+                    !t.contains(':')
+                        && prefixes
+                            .iter()
+                            .any(|p| *t == *p || t.starts_with(&format!("{p}-")))
                 })
         };
-        let enamel_layout = has(&[
-            "flex",
-            "inline-flex",
-            "grid",
-            "gap",
-            "justify",
-            "items",
-            "sort",
-            "space",
-        ]);
+        let enamel_direction = has(&["flex", "inline-flex", "grid"]);
+        let enamel_arranges = has(&["gap", "justify", "items", "sort"]);
+        // Enamel lays out children in a row unless a class says the
+        // direction; a box stacks them, so Silk asks for a column.
+        let enamel_column = enamel_arranges && !enamel_direction;
+        let enamel_layout = enamel_direction || enamel_arranges;
         let enamel_padding = has(&["p", "px", "py", "pt", "pr", "pb", "pl"]);
         let enamel_corner = has(&["rounded"]);
         let enamel_stroke = has(&["border", "ring"]);
-        let enamel_bg = has(&["bg"]);
+        let enamel_bg = has(&["bg"]) || e.attr("BackgroundColor3").is_some();
+        let enamel_text = has(&["text"]);
+        let enamel_font = has(&["font", "italic", "not-italic"]);
+        let enamel_leading = has(&["leading"]);
+        let enamel_truncate = has(&["truncate", "whitespace"]);
 
         // ---- the defaults a browser gives the tag
         let text_look = html::text_style(tag.name);
@@ -877,6 +997,18 @@ impl<'a> Writer<'a> {
             );
         }
 
+        // The text defaults an Enamel utility sets itself.
+        d.props.retain(|(k, _)| {
+            !(enamel_text
+                && matches!(
+                    k.as_str(),
+                    "TextSize" | "TextColor3" | "TextTransparency" | "TextXAlignment" | "TextWrapped"
+                ))
+                && !(enamel_font && k == "FontFace")
+                && !(enamel_leading && k == "LineHeight")
+                && !(enamel_truncate && matches!(k.as_str(), "TextTruncate" | "TextWrapped"))
+        });
+
         if class == "TextBox" {
             d.set("ClearTextOnFocus", "false");
             d.set("PlaceholderColor3", "Color3.fromRGB(117, 117, 117)");
@@ -959,6 +1091,25 @@ impl<'a> Writer<'a> {
 
             _ => None,
         };
+
+        // A child of a row sizes to its content, as a flex item does.
+        let in_row = e
+            .parent
+            .or(e.hole_owner)
+            .is_some_and(|p| self.row_parents.contains(&p));
+        let base_size = match base_size {
+            Some((w, h)) if in_row && w == full => Some((Axis::Auto, h)),
+
+            other => other,
+        };
+        let column = own_decls
+            .iter()
+            .chain(&static_decls)
+            .any(|d| d.name == "flex-direction" && d.value.trim().starts_with("column"));
+
+        if button_row || (layout_kind == Some(Layout::Flex) && !column) {
+            self.row_parents.insert(i);
+        }
 
         // The modifier children a browser's look needs.
         let stroke = |d: &mut Out, color: &str| {
@@ -1059,8 +1210,27 @@ impl<'a> Writer<'a> {
                 }
 
                 Mapped::Event(to) => {
-                    self.replace(a.name_span.0, a.name_span.1, to);
-                    written.insert(to.to_string());
+                    let button = matches!(class, "TextButton" | "ImageButton");
+                    let fits = match to {
+                        "Activated" | "MouseButton1Down" | "MouseButton1Up"
+                        | "MouseButton2Click" => button,
+
+                        "Focused" | "FocusLost" => class == "TextBox",
+
+                        _ => class != "Sound",
+                    };
+
+                    if fits {
+                        self.replace(a.name_span.0, a.name_span.1, to);
+                        written.insert(to.to_string());
+                    } else {
+                        self.find(
+                            "no_effect",
+                            a.name_span,
+                            format!("`{}` sets nothing: a {class} has no `{to}` event", a.name),
+                        );
+                        self.remove_attr(a.span);
+                    }
                 }
 
                 Mapped::Props(list) => {
@@ -1087,6 +1257,15 @@ impl<'a> Writer<'a> {
                     self.remove_attr(a.span);
                 }
 
+                Mapped::Unknown => {
+                    self.find(
+                        "unknown_attribute",
+                        a.name_span,
+                        format!("Silk does not know `{}` on `<{}>`; it sets nothing", a.name, tag.name),
+                    );
+                    self.remove_attr(a.span);
+                }
+
                 Mapped::Keep => {
                     if a.name.chars().next().is_some_and(char::is_uppercase) {
                         if !self.opts.roblox {
@@ -1104,8 +1283,12 @@ impl<'a> Writer<'a> {
                     }
 
                     "class" | "className" => match a.value {
-                        Value::Str(..) if enamel => {
+                        Value::Str(_, t) if enamel => {
                             self.replace(a.name_span.0, a.name_span.1, "ClassName");
+
+                            if enamel_column {
+                                self.insert(t, RANK_TEXT, " flex-col");
+                            }
                         }
 
                         Value::Expr(s, t) => {
@@ -1158,7 +1341,7 @@ impl<'a> Writer<'a> {
 
         m.background = style.background;
         m.opacity = style.opacity;
-        props::finish_colors(&mut m, target);
+        props::finish_colors(&mut m, target, false);
 
         if let Some(base) = base_size {
             let w = style.width.unwrap_or(base.0);
@@ -1167,7 +1350,12 @@ impl<'a> Writer<'a> {
             m.set("Size", size);
             m.set("AutomaticSize", auto);
 
-            if scroll.is_some() && matches!(h, Axis::Auto) {
+            // A rule of the file may give the height.
+            let ruled = static_decls
+                .iter()
+                .any(|d| matches!(d.name.as_str(), "height" | "max-height"));
+
+            if scroll.is_some() && matches!(h, Axis::Auto) && !ruled {
                 self.find("scroll_height", e.name_span, "a ScrollingFrame with an automatic height grows with its content and never scrolls; give it a `height`");
             }
         }
@@ -1182,7 +1370,7 @@ impl<'a> Writer<'a> {
             m.set("ScrollBarThickness", "6");
         }
 
-        if text_class {
+        if text_class && (!enamel_font || style.font.is_set()) {
             base_font = FontParts {
                 family: style.font.family.clone().or(base_font.family),
                 weight: style.font.weight.or(base_font.weight),
@@ -1228,7 +1416,9 @@ impl<'a> Writer<'a> {
 
         // ---- the order of the children
         let has_holes = !holes.is_empty();
-        let flow = matches!(kind, Kind::Block | Kind::List | Kind::Table) || demoted;
+        let flow = matches!(kind, Kind::Block | Kind::List | Kind::Table) || demoted || button_row;
+        // A table row orders its cells; the table's layout places them.
+        let ordered = flow || kind == Kind::Row;
 
         if let Some(k) = self.order.get(&i).copied()
             && !written.contains("LayoutOrder")
@@ -1244,10 +1434,10 @@ impl<'a> Writer<'a> {
         let mut runs: Vec<(usize, usize)> = Vec::new();
         let marker = self.marker(i, tag, list_style_none);
 
-        if text_class && !demoted {
+        if text_class && !demoted && !wrap_runs {
             if tag.name == "pre" || tag.kind == Kind::TextArea {
                 if let Some((s, t)) = e.inner() {
-                    text_attr = Some(luau_string(&self.src[s..t]));
+                    text_attr = Some(self.preformatted(i));
                     self.replace(s, t, "");
                 }
 
@@ -1311,9 +1501,12 @@ impl<'a> Writer<'a> {
             }
         } else if class == "TextBox" && !written.contains("Text") {
             text_attr = Some("\"\"".into());
+        } else if wrap_runs && text_class && !written.contains("Text") {
+            // The runs carry the text; the button itself shows none.
+            text_attr = Some("\"\"".into());
         }
 
-        if demoted {
+        if wrap_runs {
             runs = self.runs(i);
         }
 
@@ -1325,15 +1518,23 @@ impl<'a> Writer<'a> {
 
         if rich {
             m.set("RichText", "true");
+            self.escape_holes(i, None);
         }
 
-        // The children get their order: boxes and anonymous text.
-        if flow && !has_holes {
+        // The children get their order: boxes and anonymous text. The
+        // rows of a table's `thead` and `tbody` are the table's.
+        if ordered && !has_holes {
             let mut k = 0;
             let mut slots: Vec<(usize, Option<usize>)> = Vec::new();
 
             for c in &e.children {
                 match c {
+                    Child::Element(x) if self.tag(*x).is_some_and(|t| t.kind == Kind::Group) => {
+                        for row in self.m.element_children(*x) {
+                            slots.push((self.el(row).start, Some(row)));
+                        }
+                    }
+
                     Child::Element(x) if boxes.contains(x) => {
                         slots.push((self.el(*x).start, Some(*x)))
                     }
@@ -1364,8 +1565,29 @@ impl<'a> Writer<'a> {
             }
 
             self.write_runs(i, &runs, &run_orders, tag, &style);
-        } else if demoted {
+        } else if wrap_runs {
             self.write_runs(i, &runs, &HashMap::new(), tag, &style);
+        }
+
+        // A box holds no text: a space between two boxes, or a break with
+        // no text beside it, writes nothing.
+        if !text_class || wrap_runs {
+            let children = e.children.clone();
+
+            for c in children {
+                match c {
+                    Child::Text(s, t)
+                        if self.src[s..t].trim().is_empty()
+                            && !runs.iter().any(|(a, b)| *a <= s && t <= *b) =>
+                    {
+                        self.replace(s, t, "");
+                    }
+
+                    Child::Element(k) if self.foldable[k] && !self.covered[k] => self.blank(k),
+
+                    _ => {}
+                }
+            }
         }
 
         // ---- the layout child
@@ -1394,6 +1616,13 @@ impl<'a> Writer<'a> {
                 "SortOrder".to_string(),
                 "Enum.SortOrder.LayoutOrder".to_string(),
             )];
+
+            if button_row {
+                props.push(("FillDirection".into(), "Enum.FillDirection.Horizontal".into()));
+                props.push(("VerticalAlignment".into(), "Enum.VerticalAlignment.Center".into()));
+                props.push(("Padding".into(), "UDim.new(0, 4)".into()));
+            }
+
             props.extend(m.layout.iter().cloned());
 
             Some((class_name, props))
@@ -1493,6 +1722,129 @@ impl<'a> Writer<'a> {
         }
     }
 
+    /// The text declarations an element inherits from the `style` of the
+    /// HTML boxes around it, the outermost first, as CSS inherits them.
+    fn inherited(&self, i: usize) -> Vec<css::Decl> {
+        let mut chain = Vec::new();
+        let mut at = self.el(i).parent.or(self.el(i).hole_owner);
+
+        while let Some(p) = at {
+            if self.tag(p).is_none() {
+                break;
+            }
+
+            chain.push(p);
+            at = self.el(p).parent.or(self.el(p).hole_owner);
+        }
+
+        chain
+            .into_iter()
+            .rev()
+            .flat_map(|p| decls_of(self.src, self.el(p)))
+            .filter(|d| props::INHERITED.contains(&d.name.as_str()))
+            .collect()
+    }
+
+    /// The text of a `<pre>` or a `<textarea>` as one Luau string with
+    /// its line breaks: the text of every element inside it, and each
+    /// hole interpolated.
+    fn preformatted(&self, i: usize) -> String {
+        fn collect(w: &Writer, i: usize, out: &mut String, holes: &mut bool) {
+            for c in &w.el(i).children {
+                match c {
+                    Child::Text(s, t) => out.push_str(&w.src[*s..*t]),
+
+                    Child::Hole(s, t) => {
+                        *holes = true;
+                        out.push('\u{0}');
+                        out.push_str(w.src[s + 1..t - 1].trim());
+                        out.push('\u{1}');
+                    }
+
+                    Child::Element(k) => collect(w, *k, out, holes),
+
+                    Child::Comment(..) => {}
+                }
+            }
+        }
+
+        let mut raw = String::new();
+        let mut holes = false;
+        collect(self, i, &mut raw, &mut holes);
+        let raw = raw.strip_prefix('\n').unwrap_or(&raw);
+        let raw = raw.strip_suffix('\n').unwrap_or(raw);
+
+        if !holes {
+            return luau_string(raw);
+        }
+
+        // A hole reads as `{expr}` in a backtick string.
+        let mut out = String::from("`");
+        let mut in_hole = false;
+
+        for ch in raw.chars() {
+            match (ch, in_hole) {
+                ('\u{0}', _) => {
+                    in_hole = true;
+                    out.push('{');
+                }
+
+                ('\u{1}', _) => {
+                    in_hole = false;
+                    out.push('}');
+                }
+
+                (c, true) => out.push(c),
+
+                ('`' | '{' | '}' | '\\', false) => {
+                    out.push('\\');
+                    out.push(ch);
+                }
+
+                ('\n', false) => out.push_str("\\n"),
+
+                ('\r', false) => {}
+
+                (c, false) => out.push(c),
+            }
+        }
+
+        out.push('`');
+
+        out
+    }
+
+    /// Wraps each text hole of a RichText element in the escape helper,
+    /// so a `<` in a value shows as itself. `range` limits the holes to
+    /// a run.
+    fn escape_holes(&mut self, i: usize, range: Option<(usize, usize)>) {
+        let mut holes = Vec::new();
+        let mut stack = vec![i];
+
+        while let Some(k) = stack.pop() {
+            for c in &self.el(k).children {
+                match c {
+                    Child::Hole(s, t) => holes.push((*s, *t)),
+
+                    Child::Element(x) if self.foldable[*x] => stack.push(*x),
+
+                    _ => {}
+                }
+            }
+        }
+
+        for (s, t) in holes {
+            if range.is_some_and(|(a, b)| s < a || t > b) {
+                continue;
+            }
+
+            self.uses_rich = true;
+            let helper = format!("{}_rich(", self.opts.helper);
+            self.insert(s + 1, RANK_WRAP_OPEN, helper);
+            self.insert(t - 1, RANK_WRAP_CLOSE, ")");
+        }
+    }
+
     /// The declarations of an element's `style`: a React table, or a CSS
     /// string that the `react_style` lint reports. `report` sends the
     /// problems to the findings.
@@ -1537,7 +1889,8 @@ impl<'a> Writer<'a> {
             return None;
         }
 
-        let parent = self.el(i).parent?;
+        // An item a hole builds sits in the list that holds the hole.
+        let parent = self.el(i).parent.or(self.el(i).hole_owner)?;
         let list = &self.el(parent);
 
         // The list's own `list-style: none` turns its markers off.
@@ -1669,9 +2022,17 @@ impl<'a> Writer<'a> {
             self.find("no_effect", span, "a class on text inside text has no instance to style; RichText takes the element's `style`");
         }
 
-        let (mut open, mut close) = {
-            let (o, c) = html::rich(tag.name);
-            (o.to_string(), c.to_string())
+        let (mut open, mut close) = match tag.name {
+            // Code takes the project's monospace family.
+            "code" | "kbd" | "samp" | "tt" => (
+                format!("<font face=\"{}\">", props::rich_face(&self.opts.fonts.mono)),
+                "</font>".to_string(),
+            ),
+
+            _ => {
+                let (o, c) = html::rich(tag.name);
+                (o.to_string(), c.to_string())
+            }
         };
 
         // `style` on an inline element becomes a `<font>` tag and friends.
@@ -1729,13 +2090,7 @@ impl<'a> Writer<'a> {
                 },
 
                 "font-family" => {
-                    let url = props::family(v, &self.opts.fonts);
-                    let face = url
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or("")
-                        .trim_end_matches(".json")
-                        .to_string();
+                    let face = props::rich_face(&props::family(v, &self.opts.fonts));
                     font.push_str(&format!(" face=\"{face}\""));
                 }
 
@@ -1830,6 +2185,9 @@ impl<'a> Writer<'a> {
 
                     Some('&') => Some("&amp;".to_string()),
 
+                    // A brace would open a hole: the markup text escapes it.
+                    Some(c @ ('{' | '}' | '`' | '\\')) => Some(format!("\\{c}")),
+
                     Some(c) => Some(c.to_string()),
 
                     None => None,
@@ -1907,16 +2265,9 @@ impl<'a> Writer<'a> {
 
         close(&mut current, &mut out);
 
-        // A run keeps its text only: whitespace at its ends stays outside.
-        out.into_iter()
-            .map(|(s, t)| {
-                let inner = &self.src[s..t];
-                let lead = inner.len() - inner.trim_start().len();
-                let trail = inner.len() - inner.trim_end().len();
-
-                (s + lead, t - trail)
-            })
-            .collect()
+        // A run keeps the space at its ends: a space between a box and the
+        // text is part of the text, and nothing is left between them.
+        out
     }
 
     /// Wraps each run in a TextLabel with the element's text look.
@@ -1941,7 +2292,7 @@ impl<'a> Writer<'a> {
         let color = style
             .get("TextColor3")
             .map_or_else(|| self.opts.color.luau(), str::to_string);
-        let size = style
+        let text_size = style
             .get("TextSize")
             .map_or_else(|| css::num(look.size), str::to_string);
 
@@ -1955,8 +2306,20 @@ impl<'a> Writer<'a> {
             let order = orders
                 .get(s)
                 .map_or(String::new(), |k| format!(" LayoutOrder={{{k}}}"));
+            // In a row a run sizes to its text; in a stack it takes the
+            // width and wraps.
+            let size = match self.row_parents.contains(&i) {
+                true => "Size={UDim2.new()} AutomaticSize={Enum.AutomaticSize.XY} TextWrapped={false}",
+
+                false => "Size={UDim2.fromScale(1, 0)} AutomaticSize={Enum.AutomaticSize.Y} TextWrapped={true}",
+            };
+
+            if rich {
+                self.escape_holes(i, Some((*s, *t)));
+            }
+
             let open = format!(
-                "<TextLabel Name={{\"text\"}} BackgroundTransparency={{1}} BorderSizePixel={{0}} Size={{UDim2.fromScale(1, 0)}} AutomaticSize={{Enum.AutomaticSize.Y}} TextWrapped={{true}} TextXAlignment={{Enum.TextXAlignment.Left}} TextYAlignment={{Enum.TextYAlignment.Top}} TextColor3={{{color}}} TextSize={{{size}}} FontFace={{{}}}{}{order}>{}",
+                "<TextLabel Name={{\"text\"}} BackgroundTransparency={{1}} BorderSizePixel={{0}} {size} TextXAlignment={{Enum.TextXAlignment.Left}} TextYAlignment={{Enum.TextYAlignment.Top}} TextColor3={{{color}}} TextSize={{{text_size}}} FontFace={{{}}}{}{order}>{}",
                 font.luau(&FontParts::default(), &self.opts.fonts),
                 if rich { " RichText={true}" } else { "" },
                 marker.unwrap_or_default(),
@@ -2178,19 +2541,38 @@ return sheet end "
 pub fn helper_at(source: &str) -> usize {
     let mut at = 0usize;
 
-    for line in source.split_inclusive('\n') {
-        let trimmed = line.trim();
+    loop {
+        let rest = &source[at..];
+        let trimmed = rest.trim_start();
+        let skipped = rest.len() - trimmed.len();
 
-        if trimmed.is_empty() || trimmed.starts_with("--") {
-            at += line.len();
-
-            continue;
+        if trimmed.is_empty() {
+            return source.len();
         }
 
-        break;
-    }
+        if !trimmed.starts_with("--") {
+            // Back to the start of the line, so the prelude opens it.
+            let line_start = source[..at + skipped].rfind('\n').map_or(0, |n| n + 1);
 
-    at.min(source.len())
+            return line_start.max(at);
+        }
+
+        // A comment: a long one ends at its bracket, a line one at the
+        // line's end; the prelude goes on the next line.
+        let comment = at + skipped;
+        let end = crate::markup::skip_comment(source, comment);
+        at = source[end..].find('\n').map_or(source.len(), |n| end + n + 1);
+    }
+}
+
+/// The escape helper as one line of Alloy: a value in RichText shows its
+/// `<`, `>`, and `&` as themselves. A source reads through it.
+pub fn rich_text(helper: &str) -> String {
+    format!(
+        "local function {helper}_rich(v: any): any \
+if type(v) == \"function\" then local f: any = v return function() return {helper}_rich(f()) end end \
+return (string.gsub(string.gsub(string.gsub(tostring(v), \"&\", \"&amp;\"), \"<\", \"&lt;\"), \">\", \"&gt;\")) end "
+    )
 }
 
 /// Applies edits the way the host does, for tests.
@@ -2256,7 +2638,7 @@ mod tests {
 
         assert!(out.contains("RichText={true}"), "{out}");
         assert!(
-            out.contains("Hi \\<b>there\\</b>, {name}\\<br />\u{A9} 2026 &amp; co"),
+            out.contains("Hi \\<b>there\\</b>, {__silk_rich(name)}\\<br />\u{A9} 2026 &amp; co"),
             "{out}"
         );
     }
@@ -2404,6 +2786,145 @@ mod tests {
 
         assert!(out.contains("Text={label}"), "{out}");
         assert!(out.contains("<UIPadding"), "{out}");
+    }
+
+    fn lints(src: &str) -> Vec<String> {
+        run(src, "a.alx", &Options::default())
+            .findings
+            .into_iter()
+            .map(|f| f.lint)
+            .collect()
+    }
+
+    /// S1, S6: text beside a box takes a TextLabel of its own, and the
+    /// space between a box and its text is part of the text.
+    #[test]
+    fn text_beside_a_box_takes_its_own_label() {
+        let out = silk("return <div>Price: <button>Buy</button></div>\n");
+        assert!(out.contains("<TextLabel Name={\"text\"}"), "{out}");
+        assert!(out.contains(">Price: </TextLabel>"), "{out}");
+
+        let out = silk("return <section><h2>T</h2><span>alone</span></section>\n");
+        assert!(!out.contains("<span"), "{out}");
+        assert!(out.contains(">alone</TextLabel>"), "{out}");
+
+        let out = silk("return <label><input type=\"text\" /> Remember me</label>\n");
+        assert!(out.contains("> Remember me</TextLabel>"), "{out}");
+        assert!(!out.contains("/> <"), "{out}");
+    }
+
+    /// S2: a component takes only the props it declares.
+    #[test]
+    fn a_component_in_a_box_takes_no_layout_order() {
+        let out = silk("return <div><h1>T</h1><Card title=\"one\" /></div>\n");
+        assert!(out.contains("<Card title=\"one\" />"), "{out}");
+    }
+
+    /// S3, S4, S27, S28: the reports the manifest declares.
+    #[test]
+    fn at_rules_unknown_attributes_and_void_tags_report() {
+        assert!(lints("return <div><style>@media (x) { .a { color: red } }</style></div>\n").contains(&"unsupported_css".to_string()));
+
+        let src = "return <div><label htmlFor=\"n\">N</label><p onPointerDown={f}>x</p></div>\n";
+        let out = silk(src);
+        assert!(!out.contains("htmlFor") && !out.contains("onPointerDown"), "{out}");
+        assert!(lints(src).contains(&"unknown_attribute".to_string()));
+
+        assert!(lints("return <p>a<br>b</p>\n").contains(&"void_tag".to_string()));
+
+        let opts = Options { roblox: false, ..Options::default() };
+        let f = run("return <div><style>.x > UIListLayout { gap: 4px }</style></div>\n", "a.alx", &opts);
+        assert!(f.findings.iter().any(|f| f.lint == "roblox_instance"), "{:?}", f.findings);
+    }
+
+    /// S5: the prelude goes after a leading block comment.
+    #[test]
+    fn the_prelude_follows_a_block_comment() {
+        let src = "--[[\n    The shop.\n]]\nreturn <div className=\"x\"><p>a</p></div>\n";
+        let out = silk(src);
+        assert!(out.starts_with("--[[\n    The shop.\n]]\nlocal function __silk("), "{out}");
+    }
+
+    /// S7: text CSS on a box reaches the text inside it.
+    #[test]
+    fn text_css_on_a_box_is_inherited() {
+        let out = silk("return <div style={{ textAlign = \"center\", color = \"red\" }}><p>a</p></div>\n");
+        assert!(out.starts_with("return <Frame") && !out[..out.find("<TextLabel").unwrap()].contains("TextXAlignment"), "{out}");
+        assert!(out.contains("TextXAlignment={Enum.TextXAlignment.Center}"), "{out}");
+        assert!(out.contains("TextColor3={Color3.fromRGB(255, 0, 0)}"), "{out}");
+    }
+
+    /// S8: the React form of a style reads the string.
+    #[test]
+    fn the_react_style_form_compiles() {
+        let out = silk("return <div><style>{[[ .b { color: red; } ]]}</style></div>\n");
+        assert!(out.contains("\".b\""), "{out}");
+    }
+
+    /// S10, S11, S12: holes in lists, preformatted text, and braces.
+    #[test]
+    fn holes_bullets_preformatted_text_and_braces() {
+        let out = silk("return <ul>{items:map(function(i) return <li>{i}</li> end)}</ul>\n");
+        assert!(out.contains("\u{2022} {i}"), "{out}");
+
+        let out = silk("return <pre>line {n}\nnext</pre>\n");
+        assert!(out.contains("Text={`line {n}\\nnext`}"), "{out}");
+
+        let out = silk("return <p>&#123;x&#125;</p>\n");
+        assert!(out.contains("\\{x\\}"), "{out}");
+    }
+
+    /// S19: a flex row sizes its children to their content, and a button
+    /// with an icon lays it beside its text.
+    #[test]
+    fn a_row_sizes_its_children_to_their_content() {
+        let out = silk("return <div style={{ display = \"flex\" }}><p>a</p><p>b</p></div>\n");
+        assert!(!out.contains("<TextLabel Name={\"p\"} BorderSizePixel={0} BackgroundTransparency={1} TextColor3={Color3.fromRGB(0, 0, 0)} TextSize={16} TextWrapped={true} TextXAlignment={Enum.TextXAlignment.Left} TextYAlignment={Enum.TextYAlignment.Top} Size={UDim2.fromScale(1, 0)}"), "{out}");
+        assert!(out.contains("AutomaticSize={Enum.AutomaticSize.XY}"), "{out}");
+
+        let out = silk("return <button><img src=\"x\" /> Buy</button>\n");
+        assert!(out.contains("FillDirection={Enum.FillDirection.Horizontal}"), "{out}");
+        assert!(out.contains("> Buy</TextLabel>"), "{out}");
+    }
+
+    /// S16, S17, S23, S33: Enamel's classes and a written background.
+    #[test]
+    fn enamel_and_written_properties_keep_the_right_defaults() {
+        let opts = Options { enamel: true, ..Options::default() };
+        let text = |src: &str| apply(src, &run(src, "a.alx", &opts).edits);
+
+        let out = text("return <div className=\"hover:bg-red-500\"><p>a</p></div>\n");
+        assert!(out.contains("BackgroundTransparency={1}"), "{out}");
+
+        let out = text("return <div className=\"items-center\"><p>a</p></div>\n");
+        assert!(out.contains("ClassName=\"items-center flex-col\""), "{out}");
+
+        let out = text("return <p className=\"text-sm\">a</p>\n");
+        assert!(!out.contains("TextSize"), "{out}");
+
+        let out = silk("return <div BackgroundColor3={Color3.new(1, 0, 0)}><p>a</p></div>\n");
+        let own = &out[..out.find("<UIListLayout").unwrap()];
+        assert!(!own.contains("BackgroundTransparency={1}"), "{own}");
+
+        assert!(lints("return <input onClick={go} />\n").contains(&"no_effect".to_string()));
+    }
+
+    /// S13, S14, S26, S29: values and orders.
+    #[test]
+    fn roblox_values_media_and_table_order() {
+        let out = silk("return <div><style>.b { BackgroundColor3: rgba(0, 0, 0, 0.5); TextSize: 14px; CornerRadius: 4px }</style></div>\n");
+        assert!(out.contains("BackgroundColor3 = Color3.fromRGB(0, 0, 0)"), "{out}");
+        assert!(out.contains("TextSize = 14,") || out.contains("TextSize = 14 "), "{out}");
+        assert!(out.contains("CornerRadius = UDim.new(0, 4)"), "{out}");
+
+        let out = silk("return <p style={{ TextSize = 20 }}>a</p>\n");
+        assert!(out.contains("TextSize={20}"), "{out}");
+
+        let out = silk("return <video muted />\n");
+        assert!(out.contains("Volume={0}"), "{out}");
+
+        let out = silk("return <table><tbody><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></tbody></table>\n");
+        assert!(out.contains("<Frame Name={\"tr\"}") && out.contains("LayoutOrder={2}"), "{out}");
     }
 
     #[test]

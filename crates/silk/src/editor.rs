@@ -83,7 +83,12 @@ fn word_before(src: &str, offset: usize, word: fn(u8) -> bool) -> (String, (usiz
 /// to the end of the file or the next tag.
 fn style_at(src: &str, offset: usize) -> Option<(usize, usize)> {
     let before = &src[..offset];
-    let open = before.rfind("<style")?;
+    let mut open = before.rfind("<style")?;
+
+    // A `<style` in a comment or a string opens no CSS.
+    while !markup::in_code(src, open) {
+        open = before[..open].rfind("<style")?;
+    }
 
     if before[open..].contains("</style") {
         return None;
@@ -660,6 +665,10 @@ pub fn hover(src: &str, offset: usize) -> Option<Hover> {
                 if d.name_span.0 <= offset && offset <= d.name_span.1 {
                     return property_hover(&d.name).map(|h| h.over(u(d.name_span)));
                 }
+
+                if d.value_span.0 <= offset && offset <= d.value_span.1 {
+                    return property_hover(&d.name).map(|h| h.over(u(d.value_span)));
+                }
             }
 
             for s in &rule.selectors {
@@ -718,11 +727,17 @@ pub fn hover(src: &str, offset: usize) -> Option<Hover> {
     for a in &e.attrs {
         if a.name_span.0 <= offset && offset <= a.name_span.1 {
             let list = html::attributes(tag, e.text(src, "type"));
+            let react = html::react_name(&a.name);
+            let lower = a.name.to_ascii_lowercase();
             let becomes = list
                 .iter()
-                .find(|(n, _)| n.eq_ignore_ascii_case(&a.name))
-                .map(|(_, b)| *b);
-            let react = html::react_name(&a.name)
+                .find(|(n, _)| n.eq_ignore_ascii_case(react.unwrap_or(&a.name)))
+                .map(|(_, b)| *b)
+                .or_else(|| {
+                    (lower.starts_with("data-") || lower.starts_with("aria-"))
+                        .then_some("nothing: Silk drops it, since Roblox has no place for it")
+                });
+            let react = react
                 .map(|r| format!("\n\nReact writes `{r}`."))
                 .unwrap_or_default();
 
@@ -945,6 +960,21 @@ mod tests {
         assert!(h("src").unwrap().contains("`Image`"));
         assert!(h("objectFit").unwrap().contains("ScaleType"));
         assert!(h("border-radius").unwrap().contains("UICorner"));
+        assert!(h("4px").unwrap().contains("UICorner"));
+
+        let src = "return <div class=\"a\" data-id=\"1\">x</div>\n";
+        let h = |at: &str| hover(src, src.find(at).unwrap() + 1).map(|h| h.contents);
+
+        assert!(h("class").unwrap().contains("CollectionService"));
+        assert!(h("data-id").unwrap().contains("drops it"));
+    }
+
+    #[test]
+    fn a_style_tag_in_a_comment_or_string_opens_no_css() {
+        let src = "-- a <style> here\nlocal s = \"<style>\"\nreturn <div cla";
+
+        assert!(style_at(src, src.len()).is_none());
+        assert!(matches!(spot(src, src.len()), Some(Spot::Attr { .. })));
     }
 
     #[test]
