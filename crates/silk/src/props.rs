@@ -307,8 +307,27 @@ pub fn family(value: &str, fonts: &Fonts) -> String {
 
         _ if name.starts_with("rbxasset") => name.to_string(),
 
+        // The family files of the `Enum.Font` names that differ.
+        "gotham" => "rbxasset://fonts/families/GothamSSm.json".into(),
+
+        "source sans" | "sourcesans" | "source sans pro" => fonts.sans.clone(),
+
         _ => format!("rbxasset://fonts/families/{}.json", name.replace(' ', "")),
     }
+}
+
+/// The name RichText's `face` takes for a family file: the `Enum.Font`
+/// name where the file carries another.
+pub fn rich_face(url: &str) -> String {
+    let file = url.rsplit('/').next().unwrap_or(url).trim_end_matches(".json");
+
+    match file {
+        "SourceSansPro" => "SourceSans",
+        "GothamSSm" => "Gotham",
+        "Arimo" => "Arial",
+        other => other,
+    }
+    .to_string()
 }
 
 /// The TextSize a `font-size` names.
@@ -578,6 +597,13 @@ pub fn catalog() -> Vec<Known> {
     ]
 }
 
+/// The text properties CSS inherits from a box to the text inside it.
+pub const INHERITED: &[&str] = &[
+    "color", "font", "font-family", "font-size", "font-style", "font-weight", "line-height",
+    "text-align", "text-transform", "white-space", "text-overflow", "vertical-align",
+    "text-decoration", "text-decoration-line", "font-variant", "font-variant-caps",
+];
+
 /// CSS properties that parse and set nothing on a Roblox instance.
 pub const NO_EFFECT: &[&str] = &[
     "animation",
@@ -604,8 +630,6 @@ pub const NO_EFFECT: &[&str] = &[
     "word-spacing",
     "word-break",
     "overflow-wrap",
-    "list-style",
-    "list-style-type",
     "content",
     "float",
     "clear",
@@ -650,12 +674,32 @@ pub fn apply(decls: &[Decl], ctx: &Ctx, out: &mut Out) {
                 continue;
             }
 
-            out.set(&d.name, roblox_value(v));
+            out.set(&d.name, roblox_value(&d.name, v));
 
             continue;
         }
 
+        // A variable the file never sets leaves nothing to read.
+        if v.is_empty() && d.value.contains("var(") {
+            out.problem(
+                span,
+                "bad_value",
+                format!("`{}` names a variable no `:root` rule of this file sets", d.value.trim()),
+            );
+
+            continue;
+        }
+
+        // Text properties on a box are inherited: the text inside takes
+        // them, and the box itself has no text to set.
+        if ctx.target == Target::Container && INHERITED.contains(&d.name.as_str()) {
+            continue;
+        }
+
         match d.name.as_str() {
+            // A list's markers: read at compile time, see the emitter.
+            "list-style" | "list-style-type" => {}
+
             "background-color" => match css::color(v) {
                 Some(c) => out.background = Some(c),
 
@@ -1242,6 +1286,10 @@ pub fn apply(decls: &[Decl], ctx: &Ctx, out: &mut Out) {
                 out.rich.push(("<sc>", "</sc>"));
             }
 
+            "object-fit" | "background-size" | "image-rendering" if !ctx.target.has_image() => {
+                out.problem(d.name_span, "no_effect", format!("`{}` fits an image, and this element has none", d.name));
+            }
+
             "object-fit" | "background-size" => {
                 let s = match lower.as_str() {
                     "fill" | "100% 100%" => "Stretch",
@@ -1290,15 +1338,39 @@ pub fn apply(decls: &[Decl], ctx: &Ctx, out: &mut Out) {
 
 /// The value of a Roblox property written in CSS: a color, a number, a
 /// boolean, or Luau as written.
-fn roblox_value(v: &str) -> String {
-    if let Some(c) = css::color(v)
-        && !v.contains('.')
-    {
+fn roblox_value(name: &str, v: &str) -> String {
+    if let Some(c) = css::color(v) {
         return c.luau();
     }
 
     if v.parse::<f64>().is_ok() || v == "true" || v == "false" {
         return v.to_string();
+    }
+
+    // A length: a UDim where the property takes one, else its pixels.
+    let udim = matches!(
+        name,
+        "CornerRadius" | "PaddingTop" | "PaddingRight" | "PaddingBottom" | "PaddingLeft" | "Padding"
+    );
+    let pair = matches!(name, "Size" | "Position" | "CellSize" | "CellPadding" | "CanvasSize");
+
+    if let Some(l) = css::length(v) {
+        return match (udim, pair) {
+            (true, _) => l.udim(),
+
+            (_, true) => udim2(l, l),
+
+            _ if l.scale == 0.0 => num(l.offset),
+
+            _ => l.udim(),
+        };
+    }
+
+    if pair
+        && let [x, y] = css::words(v).as_slice()
+        && let (Some(x), Some(y)) = (css::length(x), css::length(y))
+    {
+        return udim2(x, y);
     }
 
     if v.starts_with('"') || v.starts_with('\'') || v.contains('(') || v.starts_with("Enum.") {
@@ -1754,13 +1826,16 @@ fn finish_position(out: &mut Out, p: &PosParts) {
 }
 
 /// The transparency properties an element's colors and opacity give.
-pub fn finish_colors(out: &mut Out, target: Target) {
+///
+/// A rule does not know the transparency of the element it styles, so its
+/// `opacity` leaves the background alone unless the rule sets one.
+pub fn finish_colors(out: &mut Out, target: Target, rule: bool) {
     let opacity = out.opacity.unwrap_or(1.0);
 
     if let Some(bg) = out.background {
         out.set("BackgroundColor3", bg.luau());
         out.set("BackgroundTransparency", transparency(bg.a * opacity));
-    } else if out.opacity.is_some() && target != Target::Canvas {
+    } else if out.opacity.is_some() && target != Target::Canvas && !rule {
         let base = out
             .get("BackgroundTransparency")
             .and_then(|t| t.parse::<f64>().ok())
@@ -1814,7 +1889,7 @@ mod tests {
         };
         let mut out = Out::default();
         apply(&parse_decls(style, 0), &ctx, &mut out);
-        finish_colors(&mut out, target);
+        finish_colors(&mut out, target, false);
 
         out
     }

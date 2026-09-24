@@ -539,6 +539,35 @@ fn no_code(inner: &str) -> bool {
     true
 }
 
+/// Whether `at` sits in code: in no comment and no string. It reads the
+/// file as Luau, so a quote in markup text hides the rest of its line.
+pub fn in_code(src: &str, at: usize) -> bool {
+    let b = src.as_bytes();
+    let mut i = 0;
+
+    while i < at {
+        let end = match b[i] {
+            b'-' if b.get(i + 1) == Some(&b'-') => skip_comment(src, i),
+
+            b'"' | b'\'' => skip_quoted(src, i),
+
+            b'`' => skip_backtick(src, i),
+
+            b'[' if long_open(src, i).is_some() => skip_long(src, i),
+
+            _ => i + 1,
+        };
+
+        if end > at {
+            return false;
+        }
+
+        i = end;
+    }
+
+    true
+}
+
 /// The end of a `--` comment at `i`, line or long.
 pub fn skip_comment(src: &str, i: usize) -> usize {
     let after = i + 2;

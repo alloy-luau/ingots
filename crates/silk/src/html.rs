@@ -485,8 +485,11 @@ pub enum Mapped {
     Drop,
     /// Nothing on a Roblox instance; the lint says why.
     NoEffect(&'static str),
-    /// Not an HTML attribute. It passes to the markup compiler as written.
+    /// A Roblox name, or a framework's own prop. It passes to the markup
+    /// compiler as written.
     Keep,
+    /// A name Silk does not know: it sets nothing, and the lint says so.
+    Unknown,
 }
 
 /// The value of an attribute, as the source wrote it.
@@ -888,7 +891,13 @@ pub fn map(tag: &Tag, name: &str, value: Raw, input_type: Option<&str>) -> Mappe
 
         (Video | Audio, "muted") => Mapped::Props(vec![(
             "Volume",
-            format!("if {} then 0 else 0.5", value.truth()),
+            match value.on() {
+                Some(true) => "0".to_string(),
+
+                Some(false) => "0.5".to_string(),
+
+                None => format!("if {} then 0 else 0.5", value.luau()),
+            },
         )]),
 
         (Video | Audio, "controls" | "poster" | "preload" | "playsinline") => {
@@ -953,7 +962,14 @@ pub fn map(tag: &Tag, name: &str, value: Raw, input_type: Option<&str>) -> Mappe
             | "bgcolor" | "name",
         ) => Mapped::Drop,
 
-        _ => Mapped::Keep,
+        // A framework's own props.
+        (_, "ref" | "children") => Mapped::Keep,
+
+        // `htmlFor` ties a label to a control, which Roblox does not do;
+        // a `details` shows its content, open or not.
+        (_, "htmlfor") | (Block, "open") => Mapped::Drop,
+
+        _ => Mapped::Unknown,
     }
 }
 

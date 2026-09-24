@@ -37,6 +37,16 @@ default = "deny"
 summary = "a `style` string, which React does not take"
 detail = "React takes `style` as a table of camel case properties: `style={{ backgroundColor = \"#fff\", padding = 8 }}`. A number is pixels. Real CSS goes in a `<style>` element."
 
+[lints.unknown_attribute]
+default = "warn"
+summary = "an attribute Silk does not know"
+detail = "The attribute is not HTML, not React, and not a Roblox property, so it sets nothing and Silk drops it. A typo, or an attribute with no Roblox counterpart."
+
+[lints.void_tag]
+default = "deny"
+summary = "a void tag written without its slash"
+detail = "React closes a void tag itself: `<br />`, `<img />`, `<input />`. Without the slash the markup reads the rest of the file as the tag's children. The fix writes the slash."
+
 [lints.unknown_property]
 default = "warn"
 summary = "a CSS property Silk does not know"
