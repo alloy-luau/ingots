@@ -8,11 +8,12 @@ crate under `crates/` is one ingot.
 | Ingot | What it does |
 | --- | --- |
 | [`enamel`](crates/enamel) | Utility classes on `.alx` elements: `ClassName="flex gap-2 bg-red-500 rounded-lg"` becomes Roblox properties and layout children. Tailwind's names, Roblox's values. |
+| [`silk`](crates/silk) | HTML and CSS in `.alx`, the React way: `<div>`, `<p>`, and `<button>` become Roblox instances, attributes become properties, and `<style>` becomes a StyleSheet. |
 
 ## Build
 
 The guest crate, `alloy-ingot`, comes from the compiler repository
-checked out beside this one as `../crates`.
+checked out beside this one as `../crates`, at `crates/alloy-ingot`.
 
 ```sh
 cargo build --release
@@ -23,6 +24,7 @@ A project names an ingot by the directory that holds its `ingot.toml`:
 ```toml
 [ingots]
 enamel = "../ingots/crates/enamel"
+silk = "../ingots/crates/silk"
 ```
 
 `alloy ingot info enamel` prints what it declares, and `alloy doc
