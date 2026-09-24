@@ -118,6 +118,28 @@ impl Element {
             "ViewportFrame" => Self::ViewportFrame,
             "VideoFrame" => Self::VideoFrame,
             "ScreenGui" | "SurfaceGui" | "BillboardGui" => Self::LayerGui,
+            _ => return Self::html(tag),
+        })
+    }
+
+    /// The class Silk writes for an HTML element, so its `className`
+    /// reads against the right properties.
+    fn html(tag: &str) -> Option<Self> {
+        Some(match tag {
+            "button" | "a" => Self::TextButton,
+            "input" | "textarea" => Self::TextBox,
+            "img" => Self::ImageLabel,
+            "canvas" => Self::CanvasGroup,
+            "video" => Self::VideoFrame,
+            "p" | "span" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "label" | "li" | "td"
+            | "th" | "b" | "strong" | "i" | "em" | "small" | "code" | "pre" | "blockquote"
+            | "dt" | "dd" | "figcaption" | "legend" | "caption" | "summary" | "mark" | "u"
+            | "s" | "q" => Self::TextLabel,
+            "div" | "section" | "article" | "main" | "header" | "footer" | "nav" | "aside"
+            | "form" | "fieldset" | "figure" | "ul" | "ol" | "dl" | "table" | "tr" | "body"
+            | "details" | "dialog" | "menu" | "hgroup" | "search" | "address" | "picture" => {
+                Self::Frame
+            }
             _ => return None,
         })
     }

@@ -22,19 +22,42 @@ pub struct Found {
     /// Whether the element sits among a parent's children, where an
     /// expression needs `{ }` around it.
     pub in_children: bool,
+    /// Whether the tag is an HTML element that Silk writes, with the
+    /// classes in `className` or `class`.
+    pub html: bool,
 }
 
 fn is_name_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
 }
 
-/// Every element with a `ClassName` string attribute, in source order.
+/// Every element with a `ClassName` string attribute, in source order:
+/// what the transform rewrites.
 pub fn find(source: &str) -> Vec<Found> {
+    find_named(source, "ClassName=")
+}
+
+/// Every element whose classes the editor reads: `ClassName`, and the
+/// `className` or `class` of an HTML element that Silk turns into a
+/// Roblox one, in source order.
+pub fn find_all(source: &str) -> Vec<Found> {
+    let mut out = find_named(source, "ClassName=");
+
+    for name in ["className=", "class="] {
+        out.extend(find_named(source, name).into_iter().filter(|f| f.html));
+    }
+
+    out.sort_by_key(|f| f.start);
+
+    out
+}
+
+fn find_named(source: &str, attr_name: &str) -> Vec<Found> {
     let bytes = source.as_bytes();
     let mut out = Vec::new();
     let mut from = 0;
 
-    while let Some(i) = source[from..].find("ClassName=") {
+    while let Some(i) = source[from..].find(attr_name) {
         let at = from + i;
         from = at + 1;
 
@@ -43,7 +66,7 @@ pub fn find(source: &str) -> Vec<Found> {
             continue;
         }
 
-        let q = at + "ClassName=".len();
+        let q = at + attr_name.len();
         let Some(&quote) = bytes.get(q) else {
             continue;
         };
@@ -99,6 +122,7 @@ pub fn find(source: &str) -> Vec<Found> {
             classes.push((source[s..k].to_string(), (s, k)));
         }
 
+        let html = tag.starts_with(|c: char| c.is_ascii_lowercase());
         out.push(Found {
             tag,
             start,
@@ -108,6 +132,7 @@ pub fn find(source: &str) -> Vec<Found> {
             attr,
             classes,
             in_children: in_children(source, start),
+            html,
         });
         from = attr.1;
     }
@@ -372,6 +397,32 @@ pub fn string_at(found: &[Found], source: &str, offset: usize) -> Option<(usize,
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_editor_reads_class_name_on_an_html_element() {
+        let src = "local x = <div className=\"flex card\"><Frame ClassName=\"p-2\" /><p class=\"text-sm\">a</p></div>\n";
+        let all = super::find_all(src);
+
+        assert_eq!(
+            all.iter()
+                .map(|f| (f.tag.as_str(), f.html))
+                .collect::<Vec<_>>(),
+            vec![("div", true), ("Frame", false), ("p", true)]
+        );
+        assert_eq!(
+            super::find(src).len(),
+            1,
+            "the transform reads ClassName alone"
+        );
+        assert_eq!(
+            crate::classes::Element::parse("div"),
+            Some(crate::classes::Element::Frame)
+        );
+        assert_eq!(
+            crate::classes::Element::parse("button"),
+            Some(crate::classes::Element::TextButton)
+        );
+    }
+
     use super::*;
 
     #[test]
