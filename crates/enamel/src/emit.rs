@@ -155,25 +155,55 @@ return el end "
 pub fn helper_at(source: &str) -> u32 {
     let mut at = 0usize;
 
-    for line in source.split_inclusive('\n') {
-        let trimmed = line.trim();
+    loop {
+        let rest = &source[at..];
+        let trimmed = rest.trim_start();
+        let comment = at + rest.len() - trimmed.len();
 
-        if trimmed.is_empty() || trimmed.starts_with("--") {
-            at += line.len();
-
-            continue;
+        if trimmed.is_empty() {
+            return source.len() as u32;
         }
 
-        break;
-    }
+        if !trimmed.starts_with("--") {
+            // Back to the start of the line, so the helper opens it.
+            let line_start = source[..comment].rfind('\n').map_or(0, |n| n + 1);
 
-    at.min(source.len()) as u32
+            return line_start.max(at) as u32;
+        }
+
+        // A long comment, `--[[` or `--[==[`, ends at its close bracket.
+        let after = &trimmed[2..];
+        let level = after
+            .strip_prefix('[')
+            .map(|r| r.len() - r.trim_start_matches('=').len())
+            .filter(|l| after[1 + l..].starts_with('['));
+        let end = match level {
+            Some(l) => {
+                let close = format!("]{}]", "=".repeat(l));
+
+                source[comment..]
+                    .find(&close)
+                    .map_or(source.len(), |n| comment + n + close.len())
+            }
+
+            None => comment,
+        };
+        at = source[end..].find('\n').map_or(source.len(), |n| end + n + 1);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::markup;
+
+    #[test]
+    fn the_helper_follows_a_block_comment() {
+        let src = "--[[\n  a\n]]\n--!strict\nlocal x = 1\n";
+
+        assert_eq!(&src[helper_at(src) as usize..], "local x = 1\n");
+        assert_eq!(helper_at("local x = 1\n"), 0);
+    }
 
     fn apply(source: &str, edits: &[Edit]) -> String {
         let mut edits: Vec<&Edit> = edits.iter().collect();
