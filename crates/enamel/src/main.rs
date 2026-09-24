@@ -284,6 +284,10 @@ impl Handler for Enamel {
                     // a CSS class, which Silk tags the instance with.
                     Problem::Unknown if f.html => continue,
 
+                    // Silk turns an HTML box that holds only text into a
+                    // TextLabel, so a text class on it can land.
+                    Problem::WrongElement(_, classes::Needs::Text) if f.html => continue,
+
                     Problem::Unknown => Finding::new(
                         "unknown_class",
                         span,
@@ -303,7 +307,12 @@ impl Handler for Enamel {
                         "wrong_element",
                         span,
                         format!(
-                            "`{token}` sets `{prop}`, which `<{}>` lacks; it belongs on {}",
+                            "`{token}` sets `{}`, which `<{}>` lacks; it belongs on {}",
+                            match prop.as_str() {
+                                "__weight" => "FontFace",
+
+                                p => p,
+                            },
                             f.tag,
                             needs.word()
                         ),
