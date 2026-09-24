@@ -240,7 +240,7 @@ impl Handler for Enamel {
         }
 
         self.sync_theme();
-        let found = markup::find(&file.source);
+        let found = markup::find_all(&file.source);
         let mut out = Vec::new();
 
         // A broken theme reports once, on the first class list, with the
@@ -280,6 +280,10 @@ impl Handler for Enamel {
                 let (token, (s, e)) = &f.classes[*i];
                 let span = (*s as u32, *e as u32);
                 let finding = match problem {
+                    // A class Enamel does not know on an HTML element is
+                    // a CSS class, which Silk tags the instance with.
+                    Problem::Unknown if f.html => continue,
+
                     Problem::Unknown => Finding::new(
                         "unknown_class",
                         span,
@@ -325,7 +329,7 @@ impl Handler for Enamel {
         }
 
         self.sync_theme();
-        let found = markup::find(&file.source);
+        let found = markup::find_all(&file.source);
         let Some((f, k)) = markup::class_at(&found, offset as usize) else {
             return Ok(None);
         };
@@ -347,7 +351,7 @@ impl Handler for Enamel {
         }
 
         self.sync_theme();
-        let found = markup::find(&file.source);
+        let found = markup::find_all(&file.source);
         let Some((s, e)) = markup::string_at(&found, &file.source, offset as usize) else {
             return Ok(Completions::default());
         };
@@ -452,7 +456,7 @@ impl Handler for Enamel {
         self.sync_theme();
         let mut out = Vec::new();
 
-        for f in markup::find(&file.source) {
+        for f in markup::find_all(&file.source) {
             for (token, (s, e)) in &f.classes {
                 let class = Class::parse(token);
 
@@ -487,7 +491,7 @@ impl Handler for Enamel {
             return Ok(Vec::new());
         }
 
-        let found = markup::find(&file.source);
+        let found = markup::find_all(&file.source);
         let Some((f, k)) = markup::class_at(&found, span.0 as usize) else {
             return Ok(Vec::new());
         };
