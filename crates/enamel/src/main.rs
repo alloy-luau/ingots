@@ -200,7 +200,7 @@ impl Handler for Enamel {
         let mut edits = Vec::new();
 
         for plan in &plans {
-            edits.extend(plan.edits(&self.helper, self.table));
+            edits.extend(plan.edits(&file.source, &self.helper, self.table));
         }
 
         // The theme's prelude and the state helper share one insert at

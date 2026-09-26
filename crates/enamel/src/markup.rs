@@ -27,6 +27,10 @@ pub struct Found {
     pub html: bool,
     /// The expression of a `Size={...}` attribute on the open tag.
     pub size_attr: Option<(usize, usize)>,
+    /// The `{ }` hole that is the whole body, with no `Text` attribute
+    /// on the tag. The markup compiler reads it as the Text of a text
+    /// element.
+    pub text_hole: Option<(usize, usize)>,
 }
 
 fn is_name_byte(b: u8) -> bool {
@@ -125,7 +129,14 @@ fn find_named(source: &str, attr_name: &str) -> Vec<Found> {
         }
 
         let html = tag.starts_with(|c: char| c.is_ascii_lowercase());
-        let size_attr = hole_attr(source, name_end, open_end, "Size");
+        let size_attr = attr_value(source, name_end, open_end, "Size")
+            .filter(|v| v.2)
+            .map(|(s, e, _)| (s, e));
+        let text_hole = self_close
+            .is_none()
+            .then(|| lone_hole(source, open_end, end))
+            .flatten()
+            .filter(|_| attr_value(source, name_end, open_end, "Text").is_none());
         out.push(Found {
             tag,
             start,
@@ -137,6 +148,7 @@ fn find_named(source: &str, attr_name: &str) -> Vec<Found> {
             in_children: in_children(source, start),
             html,
             size_attr,
+            text_hole,
         });
         from = attr.1;
     }
@@ -243,21 +255,25 @@ fn open_tag_end(source: &str, from: usize) -> Option<(usize, Option<(usize, usiz
     None
 }
 
-/// The span of the expression in a `name={...}` attribute of the open
-/// tag between `from` and `to`, inside the braces.
-fn hole_attr(source: &str, from: usize, to: usize, name: &str) -> Option<(usize, usize)> {
+/// The value of a `name=` attribute of the open tag between `from` and
+/// `to`: the span inside its braces or quotes, and whether it is a hole.
+fn attr_value(source: &str, from: usize, to: usize, name: &str) -> Option<(usize, usize, bool)> {
     let bytes = source.as_bytes();
     let key = format!("{name}=");
+    let named = |i: usize| {
+        i > key.len()
+            && source.get(i - key.len()..i) == Some(key.as_str())
+            && bytes[i - key.len() - 1].is_ascii_whitespace()
+    };
     let mut i = from;
 
     while i < to {
         match bytes[i] {
             b'{' => {
                 let end = skip_hole(source, i);
-                let at = i.checked_sub(key.len())?;
 
-                if source[at..i] == key && at > 0 && bytes[at - 1].is_ascii_whitespace() {
-                    return Some((i + 1, end - 1));
+                if named(i) {
+                    return Some((i + 1, end - 1, true));
                 }
 
                 i = end;
@@ -265,11 +281,15 @@ fn hole_attr(source: &str, from: usize, to: usize, name: &str) -> Option<(usize,
                 continue;
             }
             b'"' | b'\'' => {
-                let q = bytes[i];
+                let (open, q) = (i, bytes[i]);
                 i += 1;
 
                 while i < to && bytes[i] != q {
                     i += 1;
+                }
+
+                if named(open) {
+                    return Some((open + 1, i, false));
                 }
             }
             _ => {}
@@ -279,6 +299,17 @@ fn hole_attr(source: &str, from: usize, to: usize, name: &str) -> Option<(usize,
     }
 
     None
+}
+
+/// The `{ }` hole that is the whole body of an element, between the end
+/// of its open tag and its close tag.
+fn lone_hole(source: &str, open_end: usize, end: usize) -> Option<(usize, usize)> {
+    let close = source[..end].rfind("</")?;
+    let body = &source[open_end..close];
+    let start = open_end + body.len() - body.trim_start().len();
+    let stop = open_end + body.trim_end().len();
+
+    (source[start..].starts_with('{') && skip_hole(source, start) == stop).then_some((start, stop))
 }
 
 /// One past the end of the Luau comment that opens at `i`: a `--[[ ]]`

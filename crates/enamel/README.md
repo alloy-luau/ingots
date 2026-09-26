@@ -14,7 +14,9 @@ them into the properties and the layout children behind them:
 The `Frame` gets `BackgroundColor3`, `BackgroundTransparency`, and
 `Size`, plus a `UIListLayout`, a `UIPadding`, and a `UICorner` child.
 The button's `hover:` wraps the element in a one-line helper that
-connects `MouseEnter` and `MouseLeave`.
+connects `MouseEnter` and `MouseLeave`. In a text element, a body of one
+`{ }` hole is the Text. When the classes add a child there, the hole
+becomes a `Text={...}` attribute, so it does not turn into a child.
 
 Vide and Fusion use the table form of `[alx.factory]` in `alloy.toml`.
 There, a one-line component calls `Instance.new` for each child that

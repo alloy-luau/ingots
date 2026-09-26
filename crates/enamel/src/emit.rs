@@ -106,9 +106,9 @@ impl Plan<'_> {
         format!("{{ {states} }}")
     }
 
-    /// The edits for this element. `helper` names the state function;
-    /// `table` says the project lowers markup in the table form.
-    pub fn edits(&self, helper: &str, table: bool) -> Vec<Edit> {
+    /// The edits for this element in `source`. `helper` names the state
+    /// function; `table` says the project lowers markup in the table form.
+    pub fn edits(&self, source: &str, helper: &str, table: bool) -> Vec<Edit> {
         let f = self.found;
         let mut edits = Vec::new();
 
@@ -144,7 +144,26 @@ impl Plan<'_> {
                     ));
                 }
 
-                None => edits.push(Edit::insert(f.open_end as u32, children)),
+                None => match f
+                    .text_hole
+                    .filter(|_| self.element.is_some_and(Element::has_text))
+                {
+                    // The lone hole is the Text of a text element. Beside
+                    // the children it would be a child, which the markup
+                    // compiler rejects, so it becomes `Text={...}` where
+                    // it stands: the `>` moves past it.
+                    Some((s, e)) => {
+                        let gap = &source[f.open_end - 1..s];
+                        edits.push(Edit::replace(
+                            (f.open_end - 1) as u32,
+                            s as u32,
+                            format!("{} Text=", "\n".repeat(gap.matches('\n').count())),
+                        ));
+                        edits.push(Edit::insert(e as u32, format!(">{children}")));
+                    }
+
+                    None => edits.push(Edit::insert(f.open_end as u32, children)),
+                },
             }
         }
 
@@ -324,7 +343,7 @@ mod tests {
         let src = "local x = <Frame ClassName=\"flex gap-2 bg-red-500 rounded\" Name=\"a\" />\n";
         let found = markup::find(src);
         let plan = plan(&found[0], &Context::default());
-        let out = apply(src, &plan.edits("__enamel", false));
+        let out = apply(src, &plan.edits(src, "__enamel", false));
         assert_eq!(
             out,
             "local x = <Frame BackgroundColor3={Color3.fromRGB(239, 68, 68)} Name=\"a\" ><UIListLayout FillDirection={Enum.FillDirection.Horizontal} SortOrder={Enum.SortOrder.LayoutOrder} Padding={UDim.new(0, 8)} /><UICorner CornerRadius={UDim.new(0, 4)} /></Frame>\n"
@@ -336,7 +355,7 @@ mod tests {
         let src = "return (\n    <Frame>\n        <TextButton ClassName=\"bg-red-500 hover:bg-red-600 transition duration-300\">Go</TextButton>\n    </Frame>\n)\n";
         let found = markup::find(src);
         let plan = plan(&found[0], &Context::default());
-        let out = apply(src, &plan.edits("__enamel", false));
+        let out = apply(src, &plan.edits(src, "__enamel", false));
         assert!(out.contains(", false, { kind = \"default\", info = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut, 0, false, 0) })}"), "{out}");
         assert!(helper_text("__enamel").contains("TweenService"));
     }
@@ -350,10 +369,10 @@ mod tests {
         let plan = plan(&found[0], &Context::default());
 
         assert_eq!(
-            apply(src, &plan.edits("__enamel", true)),
+            apply(src, &plan.edits(src, "__enamel", true)),
             "return <TextLabel  Text=\"a\" ><__enamel_child Class=\"UIPadding\" PaddingBottom={UDim.new(0, 8)} PaddingLeft={UDim.new(0, 8)} PaddingRight={UDim.new(0, 8)} PaddingTop={UDim.new(0, 8)} /><__enamel_child Class=\"UICorner\" CornerRadius={UDim.new(0, 4)} /></TextLabel>\n"
         );
-        assert!(apply(src, &plan.edits("__enamel", false)).contains("<UIPadding "));
+        assert!(apply(src, &plan.edits(src, "__enamel", false)).contains("<UIPadding "));
 
         assert!(table_form(
             "[build]\nin = \"src\"\n\n[alx.factory]\nbackend = \"table\" # Vide\ncreate = \"vide.create\"\n"
@@ -366,6 +385,36 @@ mod tests {
         assert!(!table_form("[build]\nin = \"src\"\n"));
     }
 
+    /// A lone hole in a text element is its Text. With children beside
+    /// it, the hole moves into the open tag as `Text={...}`, in place, so
+    /// the file keeps its lines. A tag that sets Text keeps a hole child.
+    #[test]
+    fn a_lone_hole_stays_the_text_beside_the_children() {
+        let run = |src: &str| {
+            let found = markup::find(src);
+
+            apply(
+                src,
+                &plan(&found[0], &Context::default()).edits(src, "__enamel", false),
+            )
+        };
+
+        assert_eq!(
+            run("return <TextButton ClassName=\"rounded\">{x}</TextButton>\n"),
+            "return <TextButton  Text={x}><UICorner CornerRadius={UDim.new(0, 4)} /></TextButton>\n"
+        );
+        assert_eq!(
+            run("return (\n  <TextLabel ClassName=\"rounded\">\n    {x}\n  </TextLabel>\n)\n"),
+            "return (\n  <TextLabel \n Text={x}><UICorner CornerRadius={UDim.new(0, 4)} />\n  </TextLabel>\n)\n"
+        );
+        assert_eq!(
+            run("return <TextLabel ClassName=\"rounded\" Text=\"a\">{x}</TextLabel>\n"),
+            "return <TextLabel  Text=\"a\"><UICorner CornerRadius={UDim.new(0, 4)} />{x}</TextLabel>\n"
+        );
+        // A Frame has no Text: its hole is a child.
+        assert!(run("return <Frame ClassName=\"rounded\">{x}</Frame>\n").contains("/>{x}</Frame>"));
+    }
+
     /// A `Size` attribute keeps the axis no class names; the class sets
     /// the other one inside it.
     #[test]
@@ -376,7 +425,7 @@ mod tests {
 
         assert!(plan.merges_size());
         assert_eq!(
-            apply(src, &plan.edits("__enamel", false)),
+            apply(src, &plan.edits(src, "__enamel", false)),
             "return <Frame BackgroundColor3={Color3.fromRGB(239, 68, 68)} Size={__enamel_size(UDim2.new(1, 0, 0, 0), nil, UDim.new(0, 40))} />\n"
         );
 
@@ -420,7 +469,7 @@ mod tests {
         let src = "return (\n    <Frame>\n        <TextButton ClassName=\"bg-red-500 hover:bg-red-600\">Go</TextButton>\n    </Frame>\n)\n";
         let found = markup::find(src);
         let plan = plan(&found[0], &Context::default());
-        let out = apply(src, &plan.edits("__enamel", false));
+        let out = apply(src, &plan.edits(src, "__enamel", false));
         assert!(out.contains("{__enamel(<TextButton BackgroundColor3={Color3.fromRGB(239, 68, 68)}>Go</TextButton>, { hover = { BackgroundColor3 = Color3.fromRGB(220, 38, 38) } }, false)}"), "{out}");
         assert_eq!(out.matches('\n').count(), src.matches('\n').count());
     }
