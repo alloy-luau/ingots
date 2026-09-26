@@ -82,6 +82,13 @@ boxes becomes a Frame, and each run of its text becomes a TextLabel of its
 own. An element with `onClick` becomes a button: a Frame is a TextButton,
 and an ImageLabel is an ImageButton.
 
+Each child of a box takes the `LayoutOrder` of its place, so the
+UIListLayout keeps the source order. A hole and a component take theirs
+through the `__silk_order` helper, which sets it on the instance they
+give, on each instance of a list in turn, and again each time a
+function child runs. In a box that holds a hole, one place is 1000
+numbers wide, so a list in the hole keeps its own order.
+
 A child of a flex or a grid box is an item of its own, as CSS makes it:
 `<div className="flex"><span>L</span><span>R</span></div>` is a Frame
 with two TextLabels in a row. An inline tag with a class keeps its own

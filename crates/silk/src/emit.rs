@@ -160,6 +160,7 @@ struct Writer<'a> {
     text_boxes: HashSet<usize>,
     uses_rich: bool,
     uses_not: bool,
+    uses_order: bool,
     reps: Vec<(usize, usize, String)>,
     ins: Vec<(usize, i64, usize, String)>,
     seq: usize,
@@ -176,6 +177,15 @@ const RANK_PRELUDE: i64 = -10_000;
 /// of its first child, which can start at the same byte.
 const RANK_CHILDREN: i64 = 5;
 const RANK_WRAP_OPEN: i64 = 10;
+/// The order helper inside a hole wraps what the hole holds, markup and
+/// its tag wrappers included.
+const RANK_ORDER_OPEN: i64 = 5;
+const RANK_ORDER_CLOSE: i64 = -5;
+/// In a box that holds a `{ }` child, one place in the order is this many
+/// numbers wide, so the items a hole holds keep their own order.
+// ponytail: a hole keeps the order of 999 items; past that they run into
+// the next place. Widen the step if a list grows that long.
+const HOLE_STEP: usize = 1000;
 const RANK_RUN_OPEN: i64 = 20;
 const RANK_TEXT: i64 = 30;
 const RANK_RUN_CLOSE: i64 = -20;
@@ -211,6 +221,7 @@ impl<'a> Writer<'a> {
             text_boxes: HashSet::new(),
             uses_rich: false,
             uses_not: false,
+            uses_order: false,
             reps: Vec::new(),
             ins: Vec::new(),
             seq: 0,
@@ -293,6 +304,10 @@ impl<'a> Writer<'a> {
 
         if self.uses_not {
             lead.push_str(&not_text(&self.opts.helper));
+        }
+
+        if self.uses_order {
+            lead.push_str(&order_text(&self.opts.helper));
         }
 
         if !lead.is_empty() {
@@ -465,12 +480,23 @@ impl<'a> Writer<'a> {
 
                 // A Roblox element among the children of a Silk box
                 // takes its place in the order too. A component takes
-                // only the props it declares.
+                // only the props it declares, so the order helper sets it
+                // on what the component returns.
                 if let Some(k) = self.order.get(&i).copied()
                     && e.attr("LayoutOrder").is_none()
-                    && roblox::is_gui_object(&e.name)
                 {
-                    self.insert(e.name_span.1, RANK_TEXT, format!(" LayoutOrder={{{k}}}"));
+                    if roblox::is_gui_object(&e.name) {
+                        self.insert(e.name_span.1, RANK_TEXT, format!(" LayoutOrder={{{k}}}"));
+                    } else if !roblox::is_class(&e.name) {
+                        let (open, close) = self.hole_braces(i);
+                        self.uses_order = true;
+                        self.insert(
+                            e.start,
+                            RANK_WRAP_OPEN,
+                            format!("{open}{}_order((function() return ", self.opts.helper),
+                        );
+                        self.insert(e.end, RANK_WRAP_CLOSE, format!(" end)(), {k}){close}"));
+                    }
                 }
 
                 continue;
@@ -1535,6 +1561,8 @@ impl<'a> Writer<'a> {
 
         // ---- the order of the children
         let has_holes = !holes.is_empty();
+        // A hole in a box is a child, as `{children}` is, and not text.
+        let holes_are_children = matches!(kind, Kind::Block | Kind::List | Kind::Table | Kind::Row);
         let flow = matches!(kind, Kind::Block | Kind::List | Kind::Table) || demoted || button_row;
         // A table row orders its cells; the table's layout places them.
         let ordered = flow || kind == Kind::Row;
@@ -1589,13 +1617,21 @@ impl<'a> Writer<'a> {
                     rich |= !wraps.is_empty();
                 }
 
-                let content =
-                    holds_text || has_holes || marker.is_some() || written.contains("Text");
+                let content = holds_text
+                    || (has_holes && !holes_are_children)
+                    || marker.is_some()
+                    || written.contains("Text");
                 let nodes = !m.mods.is_empty() || !boxes.is_empty() || (flow && !boxes.is_empty());
 
                 // Holes alone beside element children are ambiguous to the
                 // markup compiler; one hole moves to `Text`.
-                if !holds_text && marker.is_none() && wraps.is_empty() && has_holes && nodes {
+                if !holds_text
+                    && marker.is_none()
+                    && wraps.is_empty()
+                    && has_holes
+                    && nodes
+                    && !holes_are_children
+                {
                     let exprs: Vec<String> = holes
                         .iter()
                         .map(|(s, t)| src[s + 1..t - 1].trim().to_string())
@@ -1640,22 +1676,50 @@ impl<'a> Writer<'a> {
             self.escape_holes(i, None);
         }
 
-        // The children get their order: boxes and anonymous text. The
+        // The holes that stand as children, not inside a run of text.
+        let child_holes: Vec<(usize, usize)> = holes
+            .iter()
+            .filter(|(s, t)| holes_are_children && !runs.iter().any(|(a, b)| a <= s && t <= b))
+            .copied()
+            .collect();
+
+        // In a class with a `Text` property the markup compiler reads a
+        // hole as text; a fragment keeps it a child.
+        if text_class {
+            for (s, t) in &child_holes {
+                self.insert(*s, RANK_WRAP_OPEN, "<>");
+                self.insert(*t, RANK_WRAP_CLOSE, "</>");
+            }
+        }
+
+        // The children get their order: boxes, anonymous text, and holes,
+        // which set the order on what they hold through the helper. The
         // rows of a table's `thead` and `tbody` are the table's.
-        if ordered && !has_holes {
+        if ordered {
+            enum Slot {
+                Element(usize),
+                Run,
+                Hole(usize),
+            }
+
             let mut k = 0;
-            let mut slots: Vec<(usize, Option<usize>)> = Vec::new();
+            let mut slots: Vec<(usize, Slot)> = Vec::new();
+            let step = match child_holes.is_empty() {
+                true => 1,
+
+                false => HOLE_STEP,
+            };
 
             for c in &e.children {
                 match c {
                     Child::Element(x) if self.tag(*x).is_some_and(|t| t.kind == Kind::Group) => {
                         for row in self.m.element_children(*x) {
-                            slots.push((self.el(row).start, Some(row)));
+                            slots.push((self.el(row).start, Slot::Element(row)));
                         }
                     }
 
                     Child::Element(x) if boxes.contains(x) => {
-                        slots.push((self.el(*x).start, Some(*x)))
+                        slots.push((self.el(*x).start, Slot::Element(*x)))
                     }
 
                     _ => {}
@@ -1663,7 +1727,11 @@ impl<'a> Writer<'a> {
             }
 
             for (s, _) in &runs {
-                slots.push((*s, None));
+                slots.push((*s, Slot::Run));
+            }
+
+            for (s, t) in &child_holes {
+                slots.push((*s, Slot::Hole(*t)));
             }
 
             slots.sort_by_key(|(at, _)| *at);
@@ -1671,14 +1739,22 @@ impl<'a> Writer<'a> {
 
             for (at, x) in slots {
                 k += 1;
+                let order = k * step;
 
                 match x {
-                    Some(x) => {
-                        self.order.insert(x, k);
+                    Slot::Element(x) => {
+                        self.order.insert(x, order);
                     }
 
-                    None => {
-                        run_orders.insert(at, k);
+                    Slot::Run => {
+                        run_orders.insert(at, order);
+                    }
+
+                    Slot::Hole(t) => {
+                        self.uses_order = true;
+                        let open = format!("{}_order(", self.opts.helper);
+                        self.insert(at + 1, RANK_ORDER_OPEN, open);
+                        self.insert(t - 1, RANK_ORDER_CLOSE, format!(", {order})"));
                     }
                 }
             }
@@ -2756,6 +2832,20 @@ return not v end "
     )
 }
 
+/// The order helper as one line of Alloy. It sets `LayoutOrder` on what
+/// a `{ }` child or a component gives: an instance, each instance of a
+/// list in its own order, or, for a function a reactive library runs
+/// again, what the function returns each time.
+pub fn order_text(helper: &str) -> String {
+    format!(
+        "local function {helper}_order(v: any, k: number): any \
+if type(v) == \"function\" then local f: any = v return function() return {helper}_order(f(), k) end end \
+local list: any = if typeof(v) == \"Instance\" then {{ v }} elseif type(v) == \"table\" then v else {{}} \
+for n, c in ipairs(list) do local g: any = c if typeof(c) == \"Instance\" and (g :: any):IsA(\"GuiObject\") then (g :: any).LayoutOrder = k + n - 1 end end \
+return v end "
+    )
+}
+
 /// Applies edits the way the host does, for tests.
 #[cfg(test)]
 pub fn apply(source: &str, edits: &[Edit]) -> String {
@@ -2994,11 +3084,44 @@ mod tests {
         assert!(!out.contains("/> <"), "{out}");
     }
 
-    /// S2: a component takes only the props it declares.
+    /// S2, game UI 14: a component takes only the props it declares; the
+    /// order helper sets the order on what it returns.
     #[test]
-    fn a_component_in_a_box_takes_no_layout_order() {
+    fn a_component_in_a_box_takes_its_order_through_the_helper() {
         let out = silk("return <div><h1>T</h1><Card title=\"one\" /></div>\n");
-        assert!(out.contains("<Card title=\"one\" />"), "{out}");
+        assert!(
+            out.contains("{__silk_order((function() return <Card title=\"one\" /> end)(), 2)}"),
+            "{out}"
+        );
+        assert!(
+            out.contains("local function __silk_order(v: any, k: number): any"),
+            "{out}"
+        );
+    }
+
+    /// Game UI 13: a `{ }` child keeps the order of every child, and the
+    /// items it holds keep theirs.
+    #[test]
+    fn a_hole_child_keeps_the_order() {
+        let out = silk(
+            "return <div>\n  <h2>Create World</h2>\n  <p>NAME</p>\n  {seed_box}\n  <p>SEED</p>\n</div>\n",
+        );
+        assert!(out.contains("LayoutOrder={1000}"), "{out}");
+        assert!(out.contains("LayoutOrder={2000}"), "{out}");
+        assert!(out.contains("{__silk_order(seed_box, 3000)}"), "{out}");
+        assert!(out.contains("LayoutOrder={4000}"), "{out}");
+
+        // A hole that starts with markup: the helper wraps the tag wrapper.
+        let out = silk("return <div><p>a</p>{<p className=\"x\">b</p>}</div>\n");
+        assert!(
+            out.contains("{__silk_order(__silk(function() return <TextLabel"),
+            "{out}"
+        );
+        assert!(out.contains("end, \"x\", nil), 2000)}"), "{out}");
+
+        // A clickable box keeps its hole a child, in a fragment.
+        let out = silk("return <div onClick={go}><p>a</p>{extra}</div>\n");
+        assert!(out.contains("<>{__silk_order(extra, 2000)}</>"), "{out}");
     }
 
     /// S3, S4, S27, S28: the reports the manifest declares.
