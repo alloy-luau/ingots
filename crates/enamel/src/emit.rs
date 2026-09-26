@@ -164,31 +164,16 @@ pub fn helper_at(source: &str) -> u32 {
             return source.len() as u32;
         }
 
-        if !trimmed.starts_with("--") {
+        // Past a comment: a line, or a long one to its close bracket.
+        let Some(end) = crate::markup::comment_end(source, comment) else {
             // Back to the start of the line, so the helper opens it.
             let line_start = source[..comment].rfind('\n').map_or(0, |n| n + 1);
 
             return line_start.max(at) as u32;
-        }
-
-        // A long comment, `--[[` or `--[==[`, ends at its close bracket.
-        let after = &trimmed[2..];
-        let level = after
-            .strip_prefix('[')
-            .map(|r| r.len() - r.trim_start_matches('=').len())
-            .filter(|l| after[1 + l..].starts_with('['));
-        let end = match level {
-            Some(l) => {
-                let close = format!("]{}]", "=".repeat(l));
-
-                source[comment..]
-                    .find(&close)
-                    .map_or(source.len(), |n| comment + n + close.len())
-            }
-
-            None => comment,
         };
-        at = source[end..].find('\n').map_or(source.len(), |n| end + n + 1);
+        at = source[end..]
+            .find('\n')
+            .map_or(source.len(), |n| end + n + 1);
     }
 }
 
