@@ -25,6 +25,8 @@ pub struct Options {
     pub fonts: Fonts,
     /// The text color an element has by default.
     pub color: Rgba,
+    /// The classes of the project's `enamel.aly`.
+    pub theme: crate::enamel::Theme,
 }
 
 impl Default for Options {
@@ -41,6 +43,7 @@ impl Default for Options {
                 b: 0,
                 a: 1.0,
             },
+            theme: crate::enamel::Theme::new(),
         }
     }
 }
@@ -938,12 +941,13 @@ impl<'a> Writer<'a> {
             })
             .filter(|_| enamel);
         let mut replaced = match enamel {
-            true => crate::enamel::sets(class_tokens.iter().copied()),
+            true => crate::enamel::sets(class_tokens.iter().copied(), &self.opts.theme),
 
             false => HashSet::new(),
         };
 
-        if e.attr("BackgroundColor3").is_some() {
+        // A background color shows the box, so Silk's clear background goes.
+        if replaced.contains("BackgroundColor3") || e.attr("BackgroundColor3").is_some() {
             replaced.insert("BackgroundTransparency".into());
         }
 
@@ -3151,6 +3155,30 @@ mod tests {
 
         let out = with_enamel("return <img className=\"h-full\" width=\"32\" />\n");
         assert!(out.contains("ClassName=\"h-full w-[32px]\""), "{out}");
+    }
+
+    /// Game UI 21: a theme class leaves out what its utilities set.
+    #[test]
+    fn a_theme_class_leaves_out_what_its_utilities_set() {
+        let opts = Options {
+            enamel: true,
+            theme: crate::enamel::theme(
+                "export const classes = { panel = 'bg-glass/75 rounded-2xl stroke stroke-white/15' }",
+            ),
+            ..Options::default()
+        };
+        let text = |src: &str| apply(src, &run(src, "a.alx", &opts).edits);
+
+        let out = text("return <button className=\"panel\">Go</button>\n");
+        assert!(!out.contains("Background"), "{out}");
+        assert!(
+            !out.contains("<UICorner") && !out.contains("<UIStroke"),
+            "{out}"
+        );
+        assert!(out.contains("<UIPadding"), "{out}");
+
+        let out = text("return <div className=\"panel\" />\n");
+        assert!(!out.contains("BackgroundTransparency"), "{out}");
     }
 
     /// Game UI 12: a classed child on the line of its box compiles as it

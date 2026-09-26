@@ -610,7 +610,7 @@ pub fn skip_comment(src: &str, i: usize) -> usize {
 }
 
 /// The level of a long bracket `[[` or `[==[` at `i`.
-fn long_open(src: &str, i: usize) -> Option<usize> {
+pub(crate) fn long_open(src: &str, i: usize) -> Option<usize> {
     let b = src.as_bytes();
 
     if b.get(i) != Some(&b'[') {
@@ -626,7 +626,7 @@ fn long_open(src: &str, i: usize) -> Option<usize> {
     (b.get(j) == Some(&b'[')).then_some(j - i - 1)
 }
 
-fn skip_long(src: &str, i: usize) -> usize {
+pub(crate) fn skip_long(src: &str, i: usize) -> usize {
     let Some(level) = long_open(src, i) else {
         return i + 1;
     };
@@ -640,7 +640,7 @@ fn skip_long(src: &str, i: usize) -> usize {
 
 /// The end of a quoted Luau string at `i`, or the end of the line when
 /// it does not close.
-fn skip_quoted(src: &str, i: usize) -> usize {
+pub(crate) fn skip_quoted(src: &str, i: usize) -> usize {
     skip_string(src, i, src.as_bytes()[i])
         .unwrap_or_else(|| src[i..].find('\n').map_or(src.len(), |n| i + n))
 }

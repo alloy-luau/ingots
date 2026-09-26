@@ -163,7 +163,11 @@ utilities. Silk leaves out each default that a utility sets, and only
 that one: `text-white` replaces the text color and keeps the size of an
 `h1`, and `bg-gradient-to-b` adds a UIGradient and keeps the clear
 background. A class with a state variant, `hover:bg-red-500`, keeps the
-default for the resting look. A `w-` or `h-` class replaces the size on
+default for the resting look. A class of the project's `enamel.aly`
+counts as the utilities or the properties behind it, so `panel =
+'bg-glass/75 rounded-2xl stroke'` replaces the background, the corner,
+and the border of a `<button className="panel">`. A `w-` or `h-` class
+replaces the size on
 its axis. Silk then passes its own size on the other axis to Enamel as
 a class, so `<div className="w-full">` keeps its automatic height as
 `w-full h-0 h-auto`. Every class also

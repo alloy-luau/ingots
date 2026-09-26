@@ -6,7 +6,9 @@
 //! The names follow Enamel's utilities. A key is a Roblox property, a
 //! modifier class Enamel adds (`UIPadding`), or one of the keys below.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+use crate::markup;
 
 /// A class that lays the children out in a row: `flex`, `flex-row`.
 pub const ROW: &str = "layout:row";
@@ -23,16 +25,194 @@ pub const SIZE_Y: &str = "size:y";
 pub const AUTO_X: &str = "auto:x";
 pub const AUTO_Y: &str = "auto:y";
 
+/// A class of the project's `enamel.aly`: the utilities it stands for,
+/// or the properties it sets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThemeClass {
+    Utilities(Vec<String>),
+    Props(Vec<String>),
+}
+
+/// The classes of `enamel.aly`, by name.
+pub type Theme = HashMap<String, ThemeClass>;
+
 /// Every key the classes of one element set. A class with a state
 /// variant, `hover:bg-red-500`, applies on that state alone, so the
-/// element keeps the default for its resting look.
-pub fn sets<'a>(classes: impl IntoIterator<Item = &'a str>) -> HashSet<String> {
-    classes
-        .into_iter()
-        .filter(|c| !has_variant(c))
-        .flat_map(|c| utility(c.strip_prefix('-').filter(|b| !b.is_empty()).unwrap_or(c)))
-        .map(|k| (*k).to_string())
-        .collect()
+/// element keeps the default for its resting look. A class of the theme
+/// sets what its utilities or its properties set.
+pub fn sets<'a>(classes: impl IntoIterator<Item = &'a str>, theme: &Theme) -> HashSet<String> {
+    let mut out = HashSet::new();
+
+    for class in classes {
+        add(class, theme, 0, &mut out);
+    }
+
+    out
+}
+
+fn add(class: &str, theme: &Theme, depth: usize, out: &mut HashSet<String>) {
+    if has_variant(class) {
+        return;
+    }
+
+    let base = class
+        .strip_prefix('-')
+        .filter(|b| !b.is_empty())
+        .unwrap_or(class);
+
+    // Enamel reads a theme class first, and stops at eight levels.
+    match theme.get(base) {
+        Some(ThemeClass::Utilities(list)) if depth < 8 => {
+            for c in list {
+                add(c, theme, depth + 1, out);
+            }
+        }
+
+        Some(ThemeClass::Props(keys)) => out.extend(keys.iter().cloned()),
+
+        _ => out.extend(utility(base).iter().map(|k| (*k).to_string())),
+    }
+}
+
+/// The classes of the text of an `enamel.aly`: the `classes` table it
+/// exports or returns. A string holds utilities, and a table holds
+/// properties.
+pub fn theme(text: &str) -> Theme {
+    let mut out = Theme::new();
+    let Some(open) = classes_table(text) else {
+        return out;
+    };
+    let Some(close) = markup::skip_hole(text, open) else {
+        return out;
+    };
+
+    for (name, (s, e)) in fields(text, open + 1, close - 1) {
+        let v = text[s..e].trim();
+        let at = s + text[s..e].len() - text[s..e].trim_start().len();
+        let quoted =
+            v.len() >= 2 && (v.starts_with('"') || v.starts_with('\'')) && v.ends_with(&v[..1]);
+
+        let class = if quoted {
+            ThemeClass::Utilities(
+                v[1..v.len() - 1]
+                    .split_whitespace()
+                    .map(String::from)
+                    .collect(),
+            )
+        } else if v.starts_with('{') {
+            let keys = fields(text, at + 1, at + v.len() - 1);
+
+            ThemeClass::Props(keys.into_iter().map(|(k, _)| k).collect())
+        } else {
+            continue;
+        };
+        out.insert(name, class);
+    }
+
+    out
+}
+
+/// The `{` of the `classes` table: `export const classes = {`, or
+/// `classes = {` inside the table the file returns.
+fn classes_table(text: &str) -> Option<usize> {
+    let b = text.as_bytes();
+
+    text.match_indices("classes").find_map(|(at, word)| {
+        let bounded = at.checked_sub(1).is_none_or(|p| !is_word(b[p]))
+            && !b.get(at + word.len()).is_some_and(|c| is_word(*c));
+        let rest = text[at + word.len()..].trim_start().strip_prefix('=')?;
+        let open = text.len() - rest.trim_start().len();
+
+        (bounded && b.get(open) == Some(&b'{') && markup::in_code(text, at)).then_some(open)
+    })
+}
+
+fn is_word(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// The `key = value` fields of a table between `from` and `to`. A key is
+/// a name or `["quoted"]`; the value runs to the next `,` or `;` outside
+/// any bracket, string, or comment.
+fn fields(text: &str, from: usize, to: usize) -> Vec<(String, (usize, usize))> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = from;
+
+    while i < to {
+        match b[i] {
+            c if c.is_ascii_whitespace() || c == b',' || c == b';' => i += 1,
+
+            b'-' if b.get(i + 1) == Some(&b'-') => i = markup::skip_comment(text, i),
+
+            _ => {
+                let key_start = i;
+                let key = match b[i] {
+                    b'[' => {
+                        let close = text[i..to].find(']').map_or(to, |n| i + n);
+                        let key = text[i + 1..close]
+                            .trim()
+                            .trim_matches(|c| c == '"' || c == '\'');
+                        i = close + 1;
+
+                        key.to_string()
+                    }
+
+                    _ => {
+                        while i < to && is_word(b[i]) {
+                            i += 1;
+                        }
+
+                        text[key_start..i].to_string()
+                    }
+                };
+                let after = text[i..to].trim_start();
+                let value_start = to - after.len();
+                let end = value_end(text, value_start.max(key_start + 1), to);
+
+                if let Some(value) = after.strip_prefix('=').filter(|_| !key.is_empty()) {
+                    out.push((key, (to - value.len(), end)));
+                }
+
+                i = end;
+            }
+        }
+    }
+
+    out
+}
+
+/// The end of a field's value: the next `,` or `;` outside brackets,
+/// strings, and comments, or `to`.
+fn value_end(text: &str, mut i: usize, to: usize) -> usize {
+    let b = text.as_bytes();
+    let mut depth = 0usize;
+
+    while i < to {
+        i = match b[i] {
+            b',' | b';' if depth == 0 => return i,
+
+            b'"' | b'\'' => markup::skip_quoted(text, i),
+
+            b'-' if b.get(i + 1) == Some(&b'-') => markup::skip_comment(text, i),
+
+            b'[' if markup::long_open(text, i).is_some() => markup::skip_long(text, i),
+
+            b'{' | b'(' | b'[' => {
+                depth += 1;
+                i + 1
+            }
+
+            b'}' | b')' | b']' => {
+                depth = depth.saturating_sub(1);
+                i + 1
+            }
+
+            _ => i + 1,
+        };
+    }
+
+    to
 }
 
 /// Whether a class carries a variant: a colon before any `[`, as in
@@ -166,7 +346,9 @@ mod tests {
     use super::*;
 
     fn keys(classes: &str) -> Vec<String> {
-        let mut out: Vec<String> = sets(classes.split_whitespace()).into_iter().collect();
+        let mut out: Vec<String> = sets(classes.split_whitespace(), &Theme::new())
+            .into_iter()
+            .collect();
         out.sort();
 
         out
@@ -191,5 +373,40 @@ mod tests {
         assert_eq!(keys("w-full h-auto"), [AUTO_Y, SIZE_X]);
         assert_eq!(keys("stroke stroke-white/15 ring-offset-2"), ["UIStroke"]);
         assert!(keys("card primary").is_empty());
+    }
+
+    /// Game UI 21: a class of the theme sets what its utilities set.
+    #[test]
+    fn a_theme_class_sets_what_its_utilities_set() {
+        let text = "-- The theme.\nlocal gold = Color3.fromRGB(255, 214, 92)\n\nexport const classes = {\n  -- A panel, with a comma, in a comment.\n  panel = 'bg-glass/75 rounded-2xl stroke stroke-white/15',\n  glow = { BackgroundColor3 = Color3.fromRGB(1, 2, 3), ZIndex = 2 },\n  [\"deep-panel\"] = \"panel p-4\";\n}\n";
+        let theme = theme(text);
+
+        assert_eq!(
+            theme.get("glow"),
+            Some(&ThemeClass::Props(vec![
+                "BackgroundColor3".into(),
+                "ZIndex".into()
+            ]))
+        );
+
+        let mut keys: Vec<String> = sets(["deep-panel"], &theme).into_iter().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "BackgroundColor3",
+                "BackgroundTransparency",
+                "UICorner",
+                "UIPadding",
+                "UIStroke"
+            ]
+        );
+
+        let returned = theme_of_return();
+        assert!(returned.contains_key("card"), "{returned:?}");
+    }
+
+    fn theme_of_return() -> Theme {
+        theme("local classes = { card = 'p-4' }\nreturn { colors = {}, classes = classes }\n")
     }
 }
