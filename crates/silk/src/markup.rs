@@ -359,12 +359,14 @@ impl Reader<'_> {
                 b'{' => {
                     let end = skip_hole(self.src, i)?;
                     self.out.elements[index].spreads.push((i, end));
+                    self.scan(i + 1, end - 1, owner);
                     i = end;
                 }
 
                 b'=' if self.bytes().get(i + 1) == Some(&b'{') => {
                     let end = skip_hole(self.src, i + 1)?;
                     self.out.elements[index].spreads.push((i, end));
+                    self.scan(i + 2, end - 1, owner);
                     i = end;
                 }
 
@@ -392,6 +394,9 @@ impl Reader<'_> {
                                 b'{' => {
                                     let end = skip_hole(self.src, v)?;
                                     i = end;
+                                    // A tag in the value is an element too,
+                                    // but no child of this one.
+                                    self.scan(v + 1, end - 1, owner);
 
                                     Value::Expr(v + 1, end - 1)
                                 }
@@ -775,6 +780,18 @@ mod tests {
 
         assert_eq!(li.hole_owner, Some(m.roots[0]));
         assert!(!li.in_children);
+    }
+
+    /// Game UI 18: markup in an attribute value is read.
+    #[test]
+    fn a_tag_in_an_attribute_is_an_element() {
+        let src = "return <Panel title=\"Hi\" children={[<p>one</p>, <p>two</p>]} />";
+        let m = Markup::read(src);
+        let ps: Vec<&Element> = m.elements.iter().filter(|e| e.name == "p").collect();
+
+        assert_eq!(ps.len(), 2);
+        assert!(ps.iter().all(|p| p.parent.is_none() && !p.in_children));
+        assert!(m.elements[0].children.is_empty());
     }
 
     #[test]

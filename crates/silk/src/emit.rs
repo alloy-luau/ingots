@@ -247,6 +247,17 @@ impl<'a> Writer<'a> {
         }
 
         self.replace(s, span.1, "");
+        self.cover_span(span);
+    }
+
+    /// Marks the elements inside a span as covered: an edit over the
+    /// span already writes them.
+    fn cover_span(&mut self, (s, t): (usize, usize)) {
+        for (k, e) in self.m.elements.iter().enumerate() {
+            if e.start >= s && e.end <= t {
+                self.covered[k] = true;
+            }
+        }
     }
 
     fn insert(&mut self, at: usize, rank: i64, text: impl Into<String>) {
@@ -1275,6 +1286,7 @@ impl<'a> Writer<'a> {
                         .join(" ");
                     self.uses_not |= text.contains(&format!("{}_not(", self.opts.helper));
                     self.replace(a.span.0, a.span.1, text);
+                    self.cover_span(a.span);
 
                     for (k, _) in list {
                         written.insert(k.to_string());
@@ -3092,6 +3104,20 @@ mod tests {
             out.contains("local function __silk_not(v: any): any if type(v) == \"function\""),
             "{out}"
         );
+    }
+
+    /// Game UI 18: markup inside an attribute lowers as it does in a
+    /// body hole.
+    #[test]
+    fn markup_inside_an_attribute_lowers() {
+        let out = silk("return <Panel title=\"Hi\" children={[<p>one</p>, <p>two</p>]} />\n");
+
+        assert_eq!(out.matches("<TextLabel Name={\"p\"}").count(), 2, "{out}");
+        assert!(out.contains(">one</TextLabel>, <TextLabel"), "{out}");
+
+        // An attribute Silk drops takes its markup with it.
+        let out = silk("return <div title={<p>x</p>}></div>\n");
+        assert!(!out.contains("title") && !out.contains("<p"), "{out}");
     }
 
     /// Game UI 28: a block comment holds no tag, as a line comment does.
