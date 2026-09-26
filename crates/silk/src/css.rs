@@ -266,6 +266,8 @@ fn parse_decls_clean(t: &str, base: usize) -> Vec<Decl> {
 const UNITLESS: &[&str] = &[
     "animation-iteration-count",
     "aspect-ratio",
+    "border-transparency",
+    "gradient-rotation",
     "column-count",
     "columns",
     "flex",
@@ -395,9 +397,10 @@ pub fn parse_table(text: &str, base: usize) -> (Vec<Decl>, Vec<Problem>) {
             .trim_matches(|c| c == '"' || c == '\'');
         // A Roblox property keeps its name; `WebkitTextStroke` is a
         // vendor prefix.
-        let vendor = ["Webkit", "Moz", "Ms", "O"]
-            .iter()
-            .any(|p| key.strip_prefix(p).is_some_and(|r| r.starts_with(|c: char| c.is_ascii_uppercase())));
+        let vendor = ["Webkit", "Moz", "Ms", "O"].iter().any(|p| {
+            key.strip_prefix(p)
+                .is_some_and(|r| r.starts_with(|c: char| c.is_ascii_uppercase()))
+        });
         let name = match is_roblox_name(key) && !vendor {
             true => key.to_string(),
 
@@ -443,6 +446,10 @@ pub fn parse_table(text: &str, base: usize) -> (Vec<Decl>, Vec<Problem>) {
                 important: false,
             }),
 
+            // A property with one Roblox property behind it takes a Luau
+            // value; the emitter reads it through `dynamic_table`.
+            None if DYNAMIC.contains(&name.as_str()) => {}
+
             None => problems.push(dynamic(
                 (inner_base + value_at, inner_base + value_at + value.len()),
                 &format!("`{key}`"),
@@ -451,6 +458,59 @@ pub fn parse_table(text: &str, base: usize) -> (Vec<Decl>, Vec<Problem>) {
     }
 
     (decls, problems)
+}
+
+/// The CSS properties a `style` table takes as a Luau value: each has one
+/// Roblox property behind it, which takes the value as it is.
+pub const DYNAMIC: &[&str] = &[
+    "background-color",
+    "background-gradient",
+    "border-color",
+    "border-image-source",
+    "border-transparency",
+    "border-width",
+    "color",
+    "gradient-rotation",
+    "gradient-transparency",
+    "rotate",
+    "scale",
+    "z-index",
+];
+
+/// The fields of a `style` table whose value is Luau and not a literal,
+/// for the properties of [`DYNAMIC`]: the CSS name, the expression, and
+/// its span in a file where the table starts at `base`.
+pub fn dynamic_table(text: &str, base: usize) -> Vec<(String, String, (usize, usize))> {
+    let trimmed = text.trim();
+    let Some(inner) = trimmed.strip_prefix('{').and_then(|r| r.strip_suffix('}')) else {
+        return Vec::new();
+    };
+    let inner_base = base + (text.len() - text.trim_start().len()) + 1;
+
+    fields(inner)
+        .into_iter()
+        .filter_map(|(s, e)| {
+            let field = &inner[s..e];
+            let eq = top_eq(field)?;
+            let key = field[..eq]
+                .trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'');
+            let name = kebab(key);
+            let raw = &field[eq + 1..];
+            let value = raw.trim();
+            let at = inner_base + s + eq + 1 + (raw.len() - raw.trim_start().len());
+            let quoted = value.len() >= 2
+                && (value.starts_with('"') && value.ends_with('"')
+                    || value.starts_with('\'') && value.ends_with('\''));
+            let literal = quoted || value.parse::<f64>().is_ok();
+
+            (DYNAMIC.contains(&name.as_str()) && !literal)
+                .then(|| (name, value.to_string(), (at, at + value.len())))
+        })
+        .collect()
 }
 
 /// The spans of the fields of a table's inside, split on top-level `,`

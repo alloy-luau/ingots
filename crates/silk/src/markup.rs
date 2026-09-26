@@ -359,12 +359,14 @@ impl Reader<'_> {
                 b'{' => {
                     let end = skip_hole(self.src, i)?;
                     self.out.elements[index].spreads.push((i, end));
+                    self.scan(i + 1, end - 1, owner);
                     i = end;
                 }
 
                 b'=' if self.bytes().get(i + 1) == Some(&b'{') => {
                     let end = skip_hole(self.src, i + 1)?;
                     self.out.elements[index].spreads.push((i, end));
+                    self.scan(i + 2, end - 1, owner);
                     i = end;
                 }
 
@@ -392,6 +394,9 @@ impl Reader<'_> {
                                 b'{' => {
                                     let end = skip_hole(self.src, v)?;
                                     i = end;
+                                    // A tag in the value is an element too,
+                                    // but no child of this one.
+                                    self.scan(v + 1, end - 1, owner);
 
                                     Value::Expr(v + 1, end - 1)
                                 }
@@ -568,6 +573,31 @@ pub fn in_code(src: &str, at: usize) -> bool {
     true
 }
 
+/// The spans of the long comments of a file, `--[[ ]]` and `--[==[ ]==]`.
+/// It reads no strings, so markup text with a quote in it does not hide
+/// the comments after it.
+pub fn block_comments(src: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut from = 0;
+
+    while let Some(n) = src[from..].find("--[") {
+        let at = from + n;
+
+        from = match long_open(src, at + 2) {
+            Some(_) => {
+                let end = skip_long(src, at + 2);
+                out.push((at, end));
+
+                end
+            }
+
+            None => at + 3,
+        };
+    }
+
+    out
+}
+
 /// The end of a `--` comment at `i`, line or long.
 pub fn skip_comment(src: &str, i: usize) -> usize {
     let after = i + 2;
@@ -580,7 +610,7 @@ pub fn skip_comment(src: &str, i: usize) -> usize {
 }
 
 /// The level of a long bracket `[[` or `[==[` at `i`.
-fn long_open(src: &str, i: usize) -> Option<usize> {
+pub(crate) fn long_open(src: &str, i: usize) -> Option<usize> {
     let b = src.as_bytes();
 
     if b.get(i) != Some(&b'[') {
@@ -596,7 +626,7 @@ fn long_open(src: &str, i: usize) -> Option<usize> {
     (b.get(j) == Some(&b'[')).then_some(j - i - 1)
 }
 
-fn skip_long(src: &str, i: usize) -> usize {
+pub(crate) fn skip_long(src: &str, i: usize) -> usize {
     let Some(level) = long_open(src, i) else {
         return i + 1;
     };
@@ -610,7 +640,7 @@ fn skip_long(src: &str, i: usize) -> usize {
 
 /// The end of a quoted Luau string at `i`, or the end of the line when
 /// it does not close.
-fn skip_quoted(src: &str, i: usize) -> usize {
+pub(crate) fn skip_quoted(src: &str, i: usize) -> usize {
     skip_string(src, i, src.as_bytes()[i])
         .unwrap_or_else(|| src[i..].find('\n').map_or(src.len(), |n| i + n))
 }
@@ -750,6 +780,18 @@ mod tests {
 
         assert_eq!(li.hole_owner, Some(m.roots[0]));
         assert!(!li.in_children);
+    }
+
+    /// Game UI 18: markup in an attribute value is read.
+    #[test]
+    fn a_tag_in_an_attribute_is_an_element() {
+        let src = "return <Panel title=\"Hi\" children={[<p>one</p>, <p>two</p>]} />";
+        let m = Markup::read(src);
+        let ps: Vec<&Element> = m.elements.iter().filter(|e| e.name == "p").collect();
+
+        assert_eq!(ps.len(), 2);
+        assert!(ps.iter().all(|p| p.parent.is_none() && !p.in_children));
+        assert!(m.elements[0].children.is_empty());
     }
 
     #[test]

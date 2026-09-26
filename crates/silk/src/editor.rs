@@ -402,6 +402,8 @@ pub fn complete(src: &str, offset: usize, opts: &emit::Options) -> Completions {
 
                         _ if html::event(n).is_some() => format!("{n}={{function()\n\t$0\nend}}"),
 
+                        _ if html::is_change(n) => format!("{n}={{function(text)\n\t$0\nend}}"),
+
                         "tabIndex" | "value" | "max" | "min" | "start" | "rows" | "cols"
                         | "width" | "height" | "key" => format!("{n}={{$1}}"),
 
@@ -409,10 +411,10 @@ pub fn complete(src: &str, offset: usize, opts: &emit::Options) -> Completions {
                     };
 
                     CompletionItem::new(n)
-                        .kind(match html::event(n) {
-                            Some(_) => ItemKind::Event,
+                        .kind(match html::event(n).is_some() || html::is_change(n) {
+                            true => ItemKind::Event,
 
-                            None => ItemKind::Property,
+                            false => ItemKind::Property,
                         })
                         .detail(format!(
                             "HTML attribute \u{2192} {}",

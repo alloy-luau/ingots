@@ -8,6 +8,7 @@
 pub mod css;
 pub mod editor;
 pub mod emit;
+pub mod enamel;
 pub mod html;
 pub mod markup;
 pub mod props;

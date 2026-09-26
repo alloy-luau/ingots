@@ -25,6 +25,10 @@ pub struct Options {
     pub fonts: Fonts,
     /// The text color an element has by default.
     pub color: Rgba,
+    /// The classes of the project's `enamel.aly`.
+    pub theme: crate::enamel::Theme,
+    /// The markup factory of the project.
+    pub factory: Factory,
 }
 
 impl Default for Options {
@@ -41,6 +45,8 @@ impl Default for Options {
                 b: 0,
                 a: 1.0,
             },
+            theme: crate::enamel::Theme::new(),
+            factory: Factory::default(),
         }
     }
 }
@@ -76,10 +82,18 @@ fn void_findings(src: &str) -> Vec<Finding> {
         "source", "track", "wbr",
     ];
     let mut out = Vec::new();
+    let comments = crate::markup::block_comments(src);
 
     for (lt, _) in src.match_indices('<') {
+        if comments.iter().any(|(s, e)| *s < lt && lt < *e) {
+            continue;
+        }
+
         let rest = &src[lt + 1..];
-        let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
 
         if !VOID.contains(&name.as_str()) {
             continue;
@@ -145,7 +159,16 @@ struct Writer<'a> {
     /// Elements whose children run in a row: a flex row, or a button
     /// that holds an icon beside its text.
     row_parents: HashSet<usize>,
+    /// Silk elements that become a TextLabel, a TextButton, or a TextBox.
+    text_boxes: HashSet<usize>,
     uses_rich: bool,
+    uses_not: bool,
+    uses_order: bool,
+    uses_child: bool,
+    uses_on: bool,
+    uses_viewport: bool,
+    /// The `<body>` of a document with a viewport, and its sizes.
+    viewports: HashMap<usize, Viewport>,
     reps: Vec<(usize, usize, String)>,
     ins: Vec<(usize, i64, usize, String)>,
     seq: usize,
@@ -153,12 +176,28 @@ struct Writer<'a> {
     uses_helper: bool,
     uses_sheet: bool,
     style_count: usize,
+    /// The spans of the elements Silk wraps in a `{ }` hole.
+    in_holes: Vec<(usize, usize)>,
+    /// Elements that Silk gives modifier or layout children.
+    with_children: HashSet<usize>,
 }
 
 /// Ranks for insertions at one offset: an outer opening comes first, an
 /// inner closing comes first.
 const RANK_PRELUDE: i64 = -10_000;
+/// The modifier and layout children of an element go before the wrapper
+/// of its first child, which can start at the same byte.
+const RANK_CHILDREN: i64 = 5;
 const RANK_WRAP_OPEN: i64 = 10;
+/// The order helper inside a hole wraps what the hole holds, markup and
+/// its tag wrappers included.
+const RANK_ORDER_OPEN: i64 = 5;
+const RANK_ORDER_CLOSE: i64 = -5;
+/// In a box that holds a `{ }` child, one place in the order is this many
+/// numbers wide, so the items a hole holds keep their own order.
+// ponytail: a hole keeps the order of 999 items; past that they run into
+// the next place. Widen the step if a list grows that long.
+const HOLE_STEP: usize = 1000;
 const RANK_RUN_OPEN: i64 = 20;
 const RANK_TEXT: i64 = 30;
 const RANK_RUN_CLOSE: i64 = -20;
@@ -191,7 +230,14 @@ impl<'a> Writer<'a> {
             covered: vec![false; n],
             order: HashMap::new(),
             row_parents: HashSet::new(),
+            text_boxes: HashSet::new(),
             uses_rich: false,
+            uses_not: false,
+            uses_order: false,
+            uses_child: false,
+            uses_on: false,
+            uses_viewport: false,
+            viewports: HashMap::new(),
             reps: Vec::new(),
             ins: Vec::new(),
             seq: 0,
@@ -199,6 +245,8 @@ impl<'a> Writer<'a> {
             uses_helper: false,
             uses_sheet: false,
             style_count: 0,
+            in_holes: Vec::new(),
+            with_children: HashSet::new(),
         };
         w.find_foldable();
 
@@ -234,6 +282,17 @@ impl<'a> Writer<'a> {
         }
 
         self.replace(s, span.1, "");
+        self.cover_span(span);
+    }
+
+    /// Marks the elements inside a span as covered: an edit over the
+    /// span already writes them.
+    fn cover_span(&mut self, (s, t): (usize, usize)) {
+        for (k, e) in self.m.elements.iter().enumerate() {
+            if e.start >= s && e.end <= t {
+                self.covered[k] = true;
+            }
+        }
     }
 
     fn insert(&mut self, at: usize, rank: i64, text: impl Into<String>) {
@@ -247,6 +306,7 @@ impl<'a> Writer<'a> {
     }
 
     fn finish(mut self) -> Output {
+        self.guard_text();
         let mut lead = String::new();
 
         if self.uses_helper {
@@ -259,6 +319,26 @@ impl<'a> Writer<'a> {
 
         if self.uses_rich {
             lead.push_str(&rich_text(&self.opts.helper));
+        }
+
+        if self.uses_not {
+            lead.push_str(&not_text(&self.opts.helper));
+        }
+
+        if self.uses_order {
+            lead.push_str(&order_text(&self.opts.helper));
+        }
+
+        if self.uses_child {
+            lead.push_str(&child_text(&self.opts.helper));
+        }
+
+        if self.uses_on {
+            lead.push_str(&on_text(&self.opts.helper));
+        }
+
+        if self.uses_viewport {
+            lead.push_str(&viewport_text(&self.opts.helper));
         }
 
         if !lead.is_empty() {
@@ -293,6 +373,154 @@ impl<'a> Writer<'a> {
         }
     }
 
+    // -------------------------------------------------------------- holes
+
+    /// Keeps the text in Silk's holes readable (LANG_BUGS 68). The markup
+    /// compiler finds the end of a `{ }` hole as it reads Luau, so in
+    /// markup text there a quote with no pair on its line, a backtick, a
+    /// brace, `--`, or `[[` opens a string, a hole, or a comment, and the
+    /// file does not parse. A run of such text becomes Luau strings in
+    /// holes, which the compiler reads as the same text.
+    fn guard_text(&mut self) {
+        for i in 0..self.m.elements.len() {
+            let e = self.el(i);
+
+            if self.foldable[i]
+                || !self
+                    .in_holes
+                    .iter()
+                    .any(|(s, t)| *s <= e.start && e.end <= *t)
+            {
+                continue;
+            }
+
+            // A component takes the run as one child, and a text class
+            // with nothing else inside takes it as its `Text`. Beside a
+            // child element, a lone hole would read as a child, so the
+            // run keeps its plain characters as text.
+            let component = self.tag(i).is_none() && !roblox::is_class(&e.name);
+            let alone = !self.with_children.contains(&i)
+                && e.children.iter().all(|c| match c {
+                    Child::Element(k) => self.foldable[*k],
+
+                    Child::Text(..) => true,
+
+                    _ => false,
+                });
+            let mut run: Option<(usize, usize)> = None;
+            let mut runs = Vec::new();
+            let mut comments = Vec::new();
+
+            for c in &e.children {
+                let span = match c {
+                    Child::Text(s, t) => Some((*s, *t)),
+
+                    Child::Element(k) if self.foldable[*k] => {
+                        Some((self.el(*k).start, self.el(*k).end))
+                    }
+
+                    Child::Comment(s, t) => {
+                        comments.push((*s, *t));
+                        None
+                    }
+
+                    _ => None,
+                };
+
+                match span {
+                    Some((s, t)) => run = Some(run.map_or((s, t), |(a, _)| (a, t))),
+
+                    None => runs.extend(run.take()),
+                }
+            }
+
+            runs.extend(run);
+
+            for (s, t) in runs {
+                self.guard_run(s, t, component || alone);
+            }
+
+            for (s, t) in comments {
+                self.guard_comment(s, t);
+            }
+        }
+    }
+
+    /// Whether an edit reaches past `s..t`: it writes the span already.
+    fn edited_past(&self, s: usize, t: usize) -> bool {
+        self.reps
+            .iter()
+            .any(|(a, b, _)| *a < t && *b > s && (*a < s || *b > t))
+    }
+
+    /// Writes one run of markup text as the markup compiler reads it:
+    /// the text with Silk's edits, its escapes decoded, and its lines
+    /// joined. `whole` writes it as one string, else each risky
+    /// character alone.
+    fn guard_run(&mut self, s: usize, t: usize, whole: bool) {
+        if self.edited_past(s, t) {
+            return;
+        }
+
+        let mut edits: Vec<(usize, usize, i64, usize, &str)> = self
+            .reps
+            .iter()
+            .filter(|(a, b, _)| *a >= s && *b <= t)
+            .map(|(a, b, x)| (*a, *b, 0, 0, x.as_str()))
+            .chain(
+                self.ins
+                    .iter()
+                    .filter(|(at, ..)| s < *at && *at < t)
+                    .map(|(at, r, q, x)| (*at, *at, *r, *q, x.as_str())),
+            )
+            .collect();
+        edits.sort_by_key(|(a, b, r, q, _)| (*a, *b != *a, *r, *q));
+        let mut text = String::new();
+        let mut cursor = s;
+
+        for (a, b, _, _, x) in edits {
+            text.push_str(&self.src[cursor..a]);
+            text.push_str(x);
+            cursor = b;
+        }
+
+        text.push_str(&self.src[cursor..t]);
+
+        if luau_safe(&text) {
+            return;
+        }
+
+        let words = normalise(&decode_markup(&text));
+        let out = guarded(&words, whole, self.src[s..t].matches('\n').count());
+        self.reps.retain(|(a, b, _)| !(*a >= s && *b <= t));
+        self.ins.retain(|(at, ..)| !(s < *at && *at < t));
+        self.reps.push((s, t, out));
+    }
+
+    /// A `<!-- -->` comment whose text a Luau reader misreads becomes a
+    /// long Luau comment in a hole, which the compiler drops the same way.
+    fn guard_comment(&mut self, s: usize, t: usize) {
+        let Some(inner) = self.src[s..t]
+            .strip_prefix("<!--")
+            .and_then(|x| x.strip_suffix("-->"))
+        else {
+            return;
+        };
+
+        if luau_safe(inner) || self.edited_past(s, t) {
+            return;
+        }
+
+        let mut level = 0;
+
+        while inner.contains(&format!("]{}]", "=".repeat(level))) {
+            level += 1;
+        }
+
+        let eq = "=".repeat(level);
+        self.reps.push((s, t, format!("{{--[{eq}[{inner}]{eq}]}}")));
+    }
+
     // ---------------------------------------------------------- structure
 
     /// Marks the elements that fold into their parent's text as RichText.
@@ -316,18 +544,92 @@ impl<'a> Writer<'a> {
                 )
             });
 
+            // A child of a flex or a grid box is an item of its own, as CSS
+            // makes it. An inline tag with a class keeps its instance for
+            // the class, unless text stands beside it: RichText then holds
+            // it, as a browser runs it on in the line.
+            let item = e.parent.is_some_and(|p| self.lays_out_items(p));
+            let classed = e.attr("className").or(e.attr("class")).is_some();
+
+            // An element that places itself is out of the text's flow.
             self.foldable[i] = !events
+                && !self.places_itself(i)
                 && e.hole_owner.is_none_or(|_| e.parent.is_some())
                 && e.parent.is_some()
                 && children_fold
                 && match tag.kind {
-                    Kind::Inline | Kind::Break => true,
+                    Kind::Break => true,
 
-                    Kind::Link => parent_text || parent_holds_text,
+                    Kind::Inline => !item && (!classed || parent_text),
+
+                    Kind::Link => {
+                        !item && (!classed || parent_text) && (parent_text || parent_holds_text)
+                    }
 
                     _ => false,
                 };
         }
+    }
+
+    /// Whether a box is a flex or a grid container: its `style`, a rule
+    /// of the file, or an Enamel class says so.
+    fn lays_out_items(&self, i: usize) -> bool {
+        let e = self.el(i);
+        let display = decls_of(self.src, e)
+            .into_iter()
+            .chain(self.static_decls(i))
+            .any(|d| {
+                d.name == "display"
+                    && matches!(
+                        d.value.trim(),
+                        "flex" | "inline-flex" | "grid" | "inline-grid"
+                    )
+            });
+        let classes = ["class", "className"]
+            .iter()
+            .filter_map(|n| e.text(self.src, n))
+            .flat_map(str::split_whitespace);
+        let enamel = self.opts.enamel
+            && crate::enamel::sets(classes, &self.opts.theme)
+                .iter()
+                .any(|k| k.starts_with("layout:") && k != crate::enamel::ARRANGE);
+
+        display || enamel
+    }
+
+    /// Whether an element places itself: a `Position` attribute,
+    /// `position: absolute` or `fixed`, an offset such as `top`, or an
+    /// Enamel class that sets a position, as `absolute` and `inset-0` do.
+    fn places_itself(&self, i: usize) -> bool {
+        let e = self.el(i);
+        let decls: Vec<css::Decl> = decls_of(self.src, e)
+            .into_iter()
+            .chain(self.static_decls(i))
+            .collect();
+        let mode = decls
+            .iter()
+            .rev()
+            .find(|d| d.name == "position")
+            .map(|d| d.value.trim().to_ascii_lowercase());
+        let offset = decls.iter().any(|d| {
+            matches!(
+                d.name.as_str(),
+                "top" | "left" | "right" | "bottom" | "inset"
+            )
+        });
+        let css = matches!(mode.as_deref(), Some("absolute" | "fixed"))
+            || (offset && mode.as_deref() != Some("static"));
+        let classes = ["class", "className"]
+            .iter()
+            .filter_map(|n| e.text(self.src, n))
+            .flat_map(str::split_whitespace);
+        let enamel = self.opts.enamel && {
+            let keys = crate::enamel::sets(classes, &self.opts.theme);
+
+            keys.contains("Position") || keys.contains(crate::enamel::PLACED)
+        };
+
+        e.attr("Position").is_some() || css || enamel
     }
 
     fn has_literal(&self, i: usize) -> bool {
@@ -338,15 +640,24 @@ impl<'a> Writer<'a> {
     }
 
     /// The children that stand as their own boxes: not folded, not a
-    /// `<style>`, and not removed.
+    /// `<style>`, not removed, and not a Roblox modifier such as a
+    /// UIScale, which a layout does not place.
     fn boxes(&self, i: usize) -> Vec<usize> {
         self.m
             .element_children(i)
             .filter(|k| !self.foldable[*k])
             .filter(|k| {
-                !self
-                    .tag(*k)
-                    .is_some_and(|t| matches!(t.kind, Kind::Style | Kind::Removed | Kind::Break))
+                !self.tag(*k).is_some_and(|t| {
+                    matches!(
+                        t.kind,
+                        Kind::Style | Kind::Removed | Kind::Break | Kind::Head | Kind::Meta
+                    )
+                })
+            })
+            .filter(|k| {
+                let name = &self.el(*k).name;
+
+                !roblox::is_class(name) || roblox::is_gui_object(name)
             })
             .collect()
     }
@@ -388,12 +699,24 @@ impl<'a> Writer<'a> {
 
                 // A Roblox element among the children of a Silk box
                 // takes its place in the order too. A component takes
-                // only the props it declares.
+                // only the props it declares, so the order helper sets it
+                // on what the component returns.
                 if let Some(k) = self.order.get(&i).copied()
                     && e.attr("LayoutOrder").is_none()
-                    && roblox::is_class(&e.name)
                 {
-                    self.insert(e.name_span.1, RANK_TEXT, format!(" LayoutOrder={{{k}}}"));
+                    if roblox::is_gui_object(&e.name) {
+                        self.insert(e.name_span.1, RANK_TEXT, format!(" LayoutOrder={{{k}}}"));
+                    } else if !roblox::is_class(&e.name) {
+                        let (open, close) = self.hole_braces(i);
+                        self.uses_order = true;
+                        self.insert(
+                            e.start,
+                            RANK_WRAP_OPEN,
+                            format!("{open}{}_order((function() return ", self.opts.helper),
+                        );
+                        let tail = self.live(&format!("{k})"));
+                        self.insert(e.end, RANK_WRAP_CLOSE, format!(" end)(), {tail}{close}"));
+                    }
                 }
 
                 continue;
@@ -409,6 +732,16 @@ impl<'a> Writer<'a> {
 
             match tag.kind {
                 Kind::Style => self.style(i),
+
+                Kind::Document => self.document(i, tag),
+
+                Kind::Head | Kind::Meta => self.unsupported(
+                    i,
+                    &format!(
+                        "`<{}>` belongs in the `<head>` of an `<html>` document",
+                        tag.name
+                    ),
+                ),
 
                 Kind::Removed => {
                     if tag.name == "source" {
@@ -491,6 +824,386 @@ impl<'a> Writer<'a> {
         }
     }
 
+    // ----------------------------------------------------------- document
+
+    /// `<html>` becomes a ScreenGui. Its `<head>` makes no instance: the
+    /// `<title>` and each `<meta>` set a property of the ScreenGui, and a
+    /// `<style>` there becomes a StyleLink of the ScreenGui, which styles
+    /// the whole document. The `<body>` is a box that fills the screen.
+    fn document(&mut self, i: usize, tag: &'static Tag) {
+        let e = self.el(i);
+        let src = self.src;
+        let mut props: Vec<(String, String)> = Vec::new();
+        let mut viewport: Option<Viewport> = None;
+        let mut name: Option<String> = None;
+
+        for h in self.m.element_children(i).collect::<Vec<_>>() {
+            let head = self.el(h);
+
+            if head.name != "head" {
+                continue;
+            }
+
+            self.covered[h] = true;
+
+            match head.close {
+                Some((s, t)) => {
+                    self.replace(head.start, head.open_end, "");
+                    self.replace(s, t, "");
+                }
+
+                None => self.replace(head.start, head.end, ""),
+            }
+
+            for c in head.children.clone() {
+                match c {
+                    Child::Text(s, t) => {
+                        if !src[s..t].trim().is_empty() {
+                            self.find("no_effect", (s, t), "text in the `<head>` shows nothing");
+                        }
+
+                        self.replace(s, t, "");
+                    }
+
+                    Child::Element(k) if matches!(self.el(k).name.as_str(), "title" | "meta") => {
+                        self.covered[k] = true;
+
+                        match self.el(k).name.as_str() {
+                            "title" => name = self.title(k),
+
+                            _ => self.meta(k, &mut props, &mut viewport),
+                        }
+
+                        let el = self.el(k);
+                        self.replace(el.start, el.end, "");
+                        self.cover_inside(k);
+                    }
+
+                    _ => {}
+                }
+            }
+        }
+
+        // A ScreenGui has no text: the space between the head and the body
+        // goes, and other text reports.
+        for c in e.children.clone() {
+            if let Child::Text(s, t) = c {
+                if !src[s..t].trim().is_empty() {
+                    self.find(
+                        "no_effect",
+                        (s, t),
+                        "a document shows text in its `<body>` alone",
+                    );
+                }
+
+                self.replace(s, t, "");
+            }
+        }
+
+        if let Some(vp) = viewport {
+            match self
+                .m
+                .element_children(i)
+                .find(|k| self.el(*k).name == "body")
+            {
+                Some(body) => {
+                    self.viewports.insert(body, vp);
+                }
+
+                None => self.find(
+                    "no_effect",
+                    e.name_span,
+                    "the viewport scales the `<body>`, and this document has none",
+                ),
+            }
+        }
+
+        // The attributes of `<html>`.
+        let mut written: HashSet<String> = HashSet::new();
+
+        for a in &e.attrs {
+            let raw = match a.value {
+                Value::Bare => Raw::Bare,
+
+                Value::Str(s, t) => Raw::Str(&src[s..t]),
+
+                Value::Expr(s, t) => Raw::Expr(&src[s..t]),
+            };
+
+            match html::map(tag, &a.name, raw, None, &self.opts.helper) {
+                Mapped::Keep => {
+                    if a.name.chars().next().is_some_and(char::is_uppercase) {
+                        written.insert(a.name.clone());
+                    }
+                }
+
+                Mapped::Props(list) => {
+                    let text = list
+                        .iter()
+                        .map(|(k, v)| format!("{k}={{{}}}", self.live(v)))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    self.uses_not |= text.contains(&format!("{}_not(", self.opts.helper));
+                    self.replace(a.span.0, a.span.1, text);
+
+                    for (k, _) in list {
+                        written.insert(k.to_string());
+                    }
+                }
+
+                Mapped::Read if a.name == "id" && name.is_none() => {
+                    self.replace(a.name_span.0, a.name_span.1, "Name");
+                    written.insert("Name".into());
+                }
+
+                Mapped::Read
+                    if matches!(a.name.as_str(), "className" | "class")
+                        && self.opts.enamel
+                        && matches!(a.value, Value::Str(..)) =>
+                {
+                    // Enamel's classes for a ScreenGui: `sibling-z`, `display-3`.
+                    self.replace(a.name_span.0, a.name_span.1, "ClassName");
+                }
+
+                Mapped::Drop => self.remove_attr(a.span),
+
+                Mapped::Unknown => {
+                    self.find(
+                        "unknown_attribute",
+                        a.name_span,
+                        format!(
+                            "Silk does not know `{}` on `<html>`; it sets nothing",
+                            a.name
+                        ),
+                    );
+                    self.remove_attr(a.span);
+                }
+
+                _ => {
+                    self.find(
+                        "no_effect",
+                        a.name_span,
+                        format!(
+                            "`{}` sets nothing on a ScreenGui; put it on the `<body>`",
+                            a.name
+                        ),
+                    );
+                    self.remove_attr(a.span);
+                }
+            }
+        }
+
+        let replaced = match self.opts.enamel {
+            true => crate::enamel::sets(
+                e.text(src, "className")
+                    .or(e.text(src, "class"))
+                    .unwrap_or("")
+                    .split_whitespace(),
+                &self.opts.theme,
+            ),
+
+            false => HashSet::new(),
+        };
+        // The values move to the open tag, and an edit keeps its line count.
+        if name.as_ref().is_some_and(|n| n.contains('\n'))
+            || props.iter().any(|(_, v)| v.contains('\n'))
+        {
+            self.find(
+                "dynamic_style",
+                e.name_span,
+                "a title or a meta value on more than one line cannot move to the ScreenGui; bind it to a local and write the name",
+            );
+            name = name.filter(|n| !n.contains('\n'));
+            props.retain(|(_, v)| !v.contains('\n'));
+        }
+
+        let mut generated = vec![
+            (
+                "Name".to_string(),
+                name.unwrap_or_else(|| "\"html\"".into()),
+            ),
+            // CSS stacks by `z-index` among siblings.
+            (
+                "ZIndexBehavior".to_string(),
+                "Enum.ZIndexBehavior.Sibling".to_string(),
+            ),
+        ];
+        generated.extend(props);
+        generated.retain(|(k, _)| !written.contains(k) && !replaced.contains(k));
+
+        let attrs: String = generated
+            .iter()
+            .map(|(k, v)| format!(" {k}={{{v}}}"))
+            .collect();
+        self.replace(e.name_span.0, e.name_span.1, format!("ScreenGui{attrs}"));
+
+        if let Some((s, _)) = e.close {
+            self.replace(s + 2, s + 2 + e.name.len(), "ScreenGui");
+        }
+    }
+
+    /// The `Name` a `<title>` gives: its text, its one hole, or both as
+    /// an interpolated string.
+    fn title(&self, k: usize) -> Option<String> {
+        let e = self.el(k);
+        let mut text = String::new();
+        let mut holes = 0;
+
+        for c in &e.children {
+            match c {
+                Child::Text(s, t) => {
+                    let mut run = self.src[*s..*t].to_string();
+
+                    // A `Name` is no RichText, so `&amp;` decodes here too.
+                    let rich = [
+                        ("lt", "<"),
+                        ("gt", ">"),
+                        ("quot", "\""),
+                        ("apos", "'"),
+                        ("amp", "&"),
+                    ];
+
+                    for (name, ch) in html::ENTITIES.iter().chain(&rich) {
+                        run = run.replace(&format!("&{name};"), ch);
+                    }
+
+                    text.push_str(&run.replace('`', "\\`"));
+                }
+
+                Child::Hole(s, t) => {
+                    holes += 1;
+                    text.push_str(&self.src[*s..*t]);
+                }
+
+                _ => {}
+            }
+        }
+
+        let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        match holes {
+            _ if words.is_empty() => None,
+
+            0 => Some(luau_string(&words.replace("\\`", "`"))),
+
+            1 if words.starts_with('{') && words.ends_with('}') && !words[1..].contains('{') => {
+                Some(words[1..words.len() - 1].trim().to_string())
+            }
+
+            _ => Some(format!("`{words}`")),
+        }
+    }
+
+    /// The property one `<meta>` sets, or the viewport it asks for.
+    fn meta(&mut self, k: usize, props: &mut Vec<(String, String)>, vp: &mut Option<Viewport>) {
+        let e = self.el(k);
+        let src = self.src;
+        let span = e.name_span;
+        let content = e.attr("content").map(|a| a.value);
+        let text = e.text(src, "content").map(str::trim);
+        let expr = match content {
+            Some(Value::Expr(s, t)) => Some(src[s..t].trim().to_string()),
+
+            _ => None,
+        };
+        let Some(name) = e.text(src, "name").map(str::to_ascii_lowercase) else {
+            if e.attr("charset").is_none() && e.attr("http-equiv").is_none() {
+                self.find(
+                    "bad_value",
+                    span,
+                    "a `<meta>` sets nothing without a `name`",
+                );
+            }
+
+            return;
+        };
+        // A flag is on with no content, as `<meta name="ignore-inset">`.
+        let flag = |text: Option<&str>| match text.map(str::to_ascii_lowercase).as_deref() {
+            None | Some("" | "true" | "yes" | "on" | "1") => Some(true),
+
+            Some("false" | "no" | "off" | "0") => Some(false),
+
+            _ => None,
+        };
+
+        match name.as_str() {
+            "display-order" => match (text.map(str::parse::<i64>), expr) {
+                (Some(Ok(n)), _) => props.push(("DisplayOrder".into(), n.to_string())),
+
+                (_, Some(x)) => props.push(("DisplayOrder".into(), x)),
+
+                _ => self.find(
+                    "bad_value",
+                    span,
+                    "`display-order` takes a whole number: `content=\"10\"`",
+                ),
+            },
+
+            "reset-on-spawn" | "ignore-inset" => {
+                let value = match (&expr, flag(text)) {
+                    (Some(x), _) => Some(Err(x.clone())),
+
+                    (None, Some(on)) => Some(Ok(on)),
+
+                    (None, None) => None,
+                };
+
+                match (name.as_str(), value) {
+                    (_, None) => self.find(
+                        "bad_value",
+                        span,
+                        format!("`{name}` takes `true` or `false`"),
+                    ),
+
+                    ("reset-on-spawn", Some(v)) => props.push((
+                        "ResetOnSpawn".into(),
+                        v.map_or_else(|x| x, |on| on.to_string()),
+                    )),
+
+                    // `ScreenInsets` is the modern property. A source goes to
+                    // `IgnoreGuiInset`, which takes a boolean as it is.
+                    (_, Some(Ok(on))) => props.push((
+                        "ScreenInsets".into(),
+                        match on {
+                            true => "Enum.ScreenInsets.None",
+
+                            false => "Enum.ScreenInsets.CoreUISafeInsets",
+                        }
+                        .into(),
+                    )),
+
+                    (_, Some(Err(x))) => props.push(("IgnoreGuiInset".into(), x)),
+                }
+            }
+
+            "viewport" => match (text, expr) {
+                (Some(t), _) => {
+                    let (v, problems) = Viewport::parse(t);
+
+                    for p in problems {
+                        self.find("bad_value", span, p);
+                    }
+
+                    *vp = v;
+                }
+
+                _ => self.find(
+                    "dynamic_style",
+                    span,
+                    "Silk reads the viewport when it compiles; write `content` as text",
+                ),
+            },
+
+            other => self.find(
+                "no_effect",
+                span,
+                format!(
+                    "`{other}` sets nothing on a ScreenGui; Silk reads `display-order`, `ignore-inset`, `reset-on-spawn`, and `viewport`"
+                ),
+            ),
+        }
+    }
+
     // -------------------------------------------------------------- style
 
     fn style(&mut self, i: usize) {
@@ -532,7 +1245,8 @@ impl<'a> Writer<'a> {
 
         // Each rule sits on the line of the CSS it came from.
         let mut text = format!(
-            "<StyleLink StyleSheet={{{}_sheet(\"{}\", {{",
+            "<{} StyleSheet={{{}_sheet(\"{}\", {{",
+            self.child_tag("StyleLink"),
             self.opts.helper,
             id.replace('\\', "/").replace('"', "")
         );
@@ -565,7 +1279,10 @@ impl<'a> Writer<'a> {
                 c.tag
                     .as_deref()
                     .filter(|t| t.starts_with(|ch: char| ch.is_ascii_uppercase()))
-                    .or(c.pseudo_element.as_deref().filter(|p| p.starts_with(|ch: char| ch.is_ascii_uppercase())))
+                    .or(c
+                        .pseudo_element
+                        .as_deref()
+                        .filter(|p| p.starts_with(|ch: char| ch.is_ascii_uppercase())))
             });
 
             if let Some(name) = named {
@@ -652,15 +1369,19 @@ impl<'a> Writer<'a> {
 
             // An axis the rule leaves out takes the element's own: a box
             // is as wide as its parent, and an inline tag sizes to its text.
-            let inline = last
-                .tag
-                .as_deref()
-                .and_then(html::tag)
-                .is_some_and(|t| matches!(t.kind, Kind::Inline | Kind::Button | Kind::Link | Kind::Input));
+            let inline = last.tag.as_deref().and_then(html::tag).is_some_and(|t| {
+                matches!(
+                    t.kind,
+                    Kind::Inline | Kind::Button | Kind::Link | Kind::Input
+                )
+            });
             let base_width = match inline {
                 true => Axis::Auto,
 
-                false => Axis::Len(css::Len { scale: 1.0, offset: 0.0 }),
+                false => Axis::Len(css::Len {
+                    scale: 1.0,
+                    offset: 0.0,
+                }),
             };
 
             if let Some((size, auto)) = out.size((base_width, Axis::Auto)) {
@@ -692,6 +1413,16 @@ impl<'a> Writer<'a> {
             }
 
             for (class, props) in &out.mods {
+                // A StyleRule reaches one pseudo-instance, not the gradient
+                // inside the stroke.
+                if class.contains('.') {
+                    if let Some(d) = group.iter().find(|d| d.name.starts_with("border-image")) {
+                        self.find("no_effect", d.name_span, "a StyleRule cannot reach the gradient inside the stroke; put `border-image` in the element's `style`");
+                    }
+
+                    continue;
+                }
+
                 out_rules.push(entry(&format!("{roblox_sel}::{class}"), props));
             }
 
@@ -749,6 +1480,16 @@ impl<'a> Writer<'a> {
                                         | "flex-direction"
                                         | "height"
                                         | "max-height"
+                                        | "position"
+                                        | "border-image"
+                                        | "border-image-source"
+                                        | "appearance"
+                                        | "-webkit-appearance"
+                                        | "top"
+                                        | "left"
+                                        | "right"
+                                        | "bottom"
+                                        | "inset"
                                 )
                             })
                             .cloned(),
@@ -767,6 +1508,15 @@ impl<'a> Writer<'a> {
         let input_type_owned = e.text(src, "type").map(str::to_ascii_lowercase);
         let input_type = input_type_owned.as_deref();
         let boxes = self.boxes(i);
+        // A child that places itself stands out of the flow, as a CSS
+        // `position: absolute` does. A UIListLayout would move it, so a box
+        // with one writes no layout of its own, and its text stays its own.
+        let placed = boxes.iter().any(|k| self.places_itself(*k));
+        let flow_boxes: Vec<usize> = boxes
+            .iter()
+            .copied()
+            .filter(|k| !self.places_itself(*k))
+            .collect();
         let holds_text = self.holds_text(i);
         let holes: Vec<(usize, usize)> = e
             .children
@@ -778,13 +1528,64 @@ impl<'a> Writer<'a> {
             })
             .collect();
 
+        // The style: the element's own, and what the file's rules decide
+        // about its class.
+        let static_decls = self.static_decls(i);
+        let own_decls = self.style_of(i, true);
+        // A Luau value in `style` goes to the one property behind it, so a
+        // source stays live: `style={{ scale = grow }}`. A property of the
+        // element takes the value where the `style` stands.
+        let dynamic = match e.attr("style").map(|a| a.value) {
+            Some(Value::Expr(s, t)) => css::dynamic_table(&src[s..t], s),
+
+            _ => Vec::new(),
+        };
+
+        // `border-image` with a `url()` is a 9-slice: a box becomes an
+        // ImageLabel and a button an ImageButton, and the text stands in
+        // TextLabels of its own, as beside a box.
+        let slice_at = static_decls
+            .iter()
+            .chain(&own_decls)
+            .find(|d| d.name.starts_with("border-image") && d.value.contains("url("))
+            .map(|d| d.name_span)
+            .or(dynamic
+                .iter()
+                .find(|(n, ..)| n == "border-image-source")
+                .map(|(.., span)| *span));
+        let sliced = slice_at.is_some()
+            && matches!(
+                tag.kind,
+                Kind::Block
+                    | Kind::Text
+                    | Kind::Inline
+                    | Kind::Cell
+                    | Kind::List
+                    | Kind::Button
+                    | Kind::Link
+                    | Kind::Image
+            );
+
+        if let (Some(span), false) = (slice_at, sliced) {
+            self.find(
+                "no_effect",
+                span,
+                format!(
+                    "`<{}>` takes no 9-slice; put it on a box, a button, or an `<img>`",
+                    tag.name
+                ),
+            );
+        }
+
+        let boxed = !flow_boxes.is_empty() || sliced;
+
         // The kind the element takes with the content it has.
         let mut kind = tag.kind;
 
         match kind {
-            Kind::Block if holds_text && boxes.is_empty() => kind = Kind::Text,
+            Kind::Block if holds_text && !boxed => kind = Kind::Text,
 
-            Kind::Text | Kind::Cell | Kind::Inline if !boxes.is_empty() => kind = Kind::Block,
+            Kind::Text | Kind::Cell | Kind::Inline if boxed => kind = Kind::Block,
 
             _ => {}
         }
@@ -793,11 +1594,11 @@ impl<'a> Writer<'a> {
             matches!(tag.kind, Kind::Text | Kind::Cell | Kind::Inline) && kind == Kind::Block;
         // A button or a link that holds a box, an icon beside its text,
         // lays both out in a row.
-        let button_row = matches!(tag.kind, Kind::Button | Kind::Link) && !boxes.is_empty();
+        let button_row = matches!(tag.kind, Kind::Button | Kind::Link) && boxed;
         // Text beside a box stands in a TextLabel of its own, as a
         // browser puts it in an anonymous box.
         let wrap_runs = holds_text
-            && !boxes.is_empty()
+            && boxed
             && (demoted
                 || button_row
                 || matches!(
@@ -811,13 +1612,8 @@ impl<'a> Writer<'a> {
             )
         });
 
-        // The style: the element's own, and what the file's rules decide
-        // about its class.
         let mut statics = Out::default();
-        let static_decls = self.static_decls(i);
         let mut list_style_none = false;
-
-        let own_decls = self.style_of(i, true);
 
         for d in static_decls.iter().chain(&own_decls) {
             if matches!(d.name.as_str(), "list-style" | "list-style-type") {
@@ -844,7 +1640,23 @@ impl<'a> Writer<'a> {
             };
         }
 
-        let target = target_of(class);
+        if sliced {
+            class = match class {
+                "Frame" | "TextLabel" => "ImageLabel",
+
+                "TextButton" => "ImageButton",
+
+                c => c,
+            };
+        }
+
+        // A box with a 9-slice takes the image properties, and its text
+        // properties go to the text inside it.
+        let target = match sliced && tag.kind != Kind::Image {
+            true => Target::Panel,
+
+            false => target_of(class),
+        };
         let ctx = Ctx {
             vars: &self.vars,
             fonts: &self.opts.fonts,
@@ -864,12 +1676,52 @@ impl<'a> Writer<'a> {
         let mut decls = self.inherited(i);
         decls.extend(own_decls.iter().cloned());
         props::apply(&decls, &ctx, &mut style);
+        // The runs of text take the text properties of the element.
+        let mut run_style = Out::default();
+        props::apply(
+            &decls,
+            &Ctx {
+                target: Target::Text,
+                ..ctx
+            },
+            &mut run_style,
+        );
 
         for p in std::mem::take(&mut style.problems) {
+            // A `SliceCenter` on the tag places the slice, and an element
+            // with no 9-slice reports it once.
+            if (e.attr("SliceCenter").is_some() || !sliced)
+                && p.message.starts_with(props::UNPLACED_SLICE)
+            {
+                continue;
+            }
+
             self.find(p.lint, p.span, p.message);
         }
 
-        let scroll = style.scroll.or(statics.scroll);
+        if !sliced {
+            style.props.retain(|(k, _)| {
+                !matches!(
+                    (slice_at.is_some(), k.as_str()),
+                    (true, "Image" | "ScaleType" | "SliceCenter" | "SliceScale")
+                )
+            });
+        }
+
+        // An Enamel class that scrolls, `overflow-y-auto`, makes the box a
+        // ScrollingFrame too.
+        let enamel_scroll = match self.opts.enamel {
+            true => crate::enamel::scroll(
+                ["class", "className"]
+                    .iter()
+                    .filter_map(|n| e.text(src, n))
+                    .flat_map(str::split_whitespace),
+                &self.opts.theme,
+            ),
+
+            false => None,
+        };
+        let scroll = style.scroll.or(statics.scroll).or(enamel_scroll);
 
         if scroll.is_some() && class == "Frame" {
             class = "ScrollingFrame";
@@ -878,39 +1730,51 @@ impl<'a> Writer<'a> {
         let layout_kind = style.layout_kind.or(statics.layout_kind);
         let text_class = matches!(class, "TextLabel" | "TextButton" | "TextBox");
 
+        if text_class {
+            self.text_boxes.insert(i);
+        }
+
         // Enamel reads the same classes; Silk leaves the properties its
-        // utilities set to it.
+        // utilities set to it, and a background the author wrote keeps
+        // its color.
         let class_tokens: Vec<&str> = ["class", "className"]
             .iter()
             .filter_map(|n| e.text(src, n))
             .flat_map(str::split_whitespace)
             .collect();
         let enamel = self.opts.enamel && !class_tokens.is_empty();
-        // A utility with a state variant applies on that state alone, so
-        // the element keeps the defaults for its resting look.
-        let has = |prefixes: &[&str]| {
-            enamel
-                && class_tokens.iter().any(|t| {
-                    !t.contains(':')
-                        && prefixes
-                            .iter()
-                            .any(|p| *t == *p || t.starts_with(&format!("{p}-")))
-                })
+        // The end of the class list, where Silk adds a class for Enamel.
+        let class_end = ["className", "class"]
+            .iter()
+            .find_map(|n| match e.attr(n)?.value {
+                Value::Str(_, t) => Some(t),
+
+                _ => None,
+            })
+            .filter(|_| enamel);
+        let mut replaced = match enamel {
+            true => crate::enamel::sets(class_tokens.iter().copied(), &self.opts.theme),
+
+            false => HashSet::new(),
         };
-        let enamel_direction = has(&["flex", "inline-flex", "grid"]);
-        let enamel_arranges = has(&["gap", "justify", "items", "sort"]);
+
+        // A background color shows the box, so Silk's clear background goes.
+        if replaced.contains("BackgroundColor3") || e.attr("BackgroundColor3").is_some() {
+            replaced.insert("BackgroundTransparency".into());
+        }
+
+        let enamel_direction = [
+            crate::enamel::ROW,
+            crate::enamel::COLUMN,
+            crate::enamel::GRID,
+        ]
+        .iter()
+        .any(|k| replaced.contains(*k));
+        let enamel_arranges = replaced.contains(crate::enamel::ARRANGE);
         // Enamel lays out children in a row unless a class says the
         // direction; a box stacks them, so Silk asks for a column.
         let enamel_column = enamel_arranges && !enamel_direction;
         let enamel_layout = enamel_direction || enamel_arranges;
-        let enamel_padding = has(&["p", "px", "py", "pt", "pr", "pb", "pl"]);
-        let enamel_corner = has(&["rounded"]);
-        let enamel_stroke = has(&["border", "ring"]);
-        let enamel_bg = has(&["bg"]) || e.attr("BackgroundColor3").is_some();
-        let enamel_text = has(&["text"]);
-        let enamel_font = has(&["font", "italic", "not-italic"]);
-        let enamel_leading = has(&["leading"]);
-        let enamel_truncate = has(&["truncate", "whitespace"]);
 
         // ---- the defaults a browser gives the tag
         let text_look = html::text_style(tag.name);
@@ -938,7 +1802,7 @@ impl<'a> Writer<'a> {
             _ => None,
         };
 
-        if !enamel_bg && class != "Sound" {
+        if class != "Sound" {
             match background {
                 Some(c) => {
                     d.set("BackgroundColor3", c);
@@ -996,18 +1860,6 @@ impl<'a> Writer<'a> {
                 },
             );
         }
-
-        // The text defaults an Enamel utility sets itself.
-        d.props.retain(|(k, _)| {
-            !(enamel_text
-                && matches!(
-                    k.as_str(),
-                    "TextSize" | "TextColor3" | "TextTransparency" | "TextXAlignment" | "TextWrapped"
-                ))
-                && !(enamel_font && k == "FontFace")
-                && !(enamel_leading && k == "LineHeight")
-                && !(enamel_truncate && matches!(k.as_str(), "TextTruncate" | "TextWrapped"))
-        });
 
         if class == "TextBox" {
             d.set("ClearTextOnFocus", "false");
@@ -1107,7 +1959,10 @@ impl<'a> Writer<'a> {
             .chain(&static_decls)
             .any(|d| d.name == "flex-direction" && d.value.trim().starts_with("column"));
 
-        if button_row || (layout_kind == Some(Layout::Flex) && !column) {
+        let enamel_row =
+            replaced.contains(crate::enamel::ROW) && !replaced.contains(crate::enamel::COLUMN);
+
+        if button_row || (layout_kind == Some(Layout::Flex) && !column) || enamel_row {
             self.row_parents.insert(i);
         }
 
@@ -1160,16 +2015,71 @@ impl<'a> Writer<'a> {
             _ => {}
         }
 
-        if enamel_padding {
-            d.mods.retain(|(c, _)| *c != "UIPadding");
+        // The defaults a class of the element sets itself.
+        d.props.retain(|(k, _)| !replaced.contains(k));
+        d.mods.retain(|(c, _)| !replaced.contains(*c));
+
+        // A 9-slice draws the border, and a CSS corner does not clip it.
+        if sliced {
+            d.mods
+                .retain(|(c, _)| !matches!(*c, "UIStroke" | "UICorner"));
         }
 
-        if enamel_corner {
-            d.mods.retain(|(c, _)| *c != "UICorner");
+        // `appearance: none` drops the look a browser gives a control, as
+        // Tailwind's reset does: the background, the border, the corner,
+        // and the padding.
+        let plain = style.plain
+            || replaced.contains(crate::enamel::APPEARANCE)
+            || static_decls
+                .iter()
+                .any(|d| d.name.ends_with("appearance") && d.value.trim() == "none");
+
+        if plain && matches!(tag.kind, Kind::Button | Kind::Input | Kind::TextArea) {
+            d.mods.clear();
+            d.props.retain(|(k, _)| k != "BackgroundColor3");
+            d.set("BackgroundTransparency", "1");
         }
 
-        if enamel_stroke {
-            d.mods.retain(|(c, _)| *c != "UIStroke");
+        let mut in_place: Vec<(&'static str, String)> = Vec::new();
+
+        for (name, value, span) in &dynamic {
+            let key = match name.as_str() {
+                "background-color" => "BackgroundColor3",
+
+                "color" if target == Target::Image => "ImageColor3",
+
+                "color" => "TextColor3",
+
+                "rotate" => "Rotation",
+
+                "z-index" => "ZIndex",
+
+                "border-image-source" if sliced => "Image",
+
+                _ => continue,
+            };
+
+            // A property the tag sets keeps the value of the tag, and the
+            // table holds the key once.
+            if e.attr(key).is_some() {
+                self.find(
+                    "no_effect",
+                    *span,
+                    format!("this sets nothing: the tag sets `{key}`"),
+                );
+
+                continue;
+            }
+
+            in_place.push((key, value.clone()));
+
+            // A background color shows the box.
+            if key == "BackgroundColor3"
+                && d.get("BackgroundTransparency") == Some("1")
+                && e.attr("BackgroundTransparency").is_none()
+            {
+                in_place.push(("BackgroundTransparency", "0".into()));
+            }
         }
 
         // ---- the attributes
@@ -1178,6 +2088,11 @@ impl<'a> Writer<'a> {
         let mut name_from_id = false;
         let mut tags_expr: Option<String> = None;
         let mut href: Option<String> = None;
+        let mut change: Option<String> = None;
+        // The handler stays where it stands until the helper takes it: an
+        // edit keeps its line count, so a handler on more lines cannot move.
+        let mut change_span: Option<(usize, usize)> = None;
+        let mut limit: Option<String> = None;
 
         for a in &e.attrs {
             if let Some(react) = html::react_name(&a.name) {
@@ -1203,7 +2118,7 @@ impl<'a> Writer<'a> {
                 Value::Expr(s, t) => Raw::Expr(&src[s..t]),
             };
 
-            match html::map(tag, &a.name, raw, input_type) {
+            match html::map(tag, &a.name, raw, input_type, &self.opts.helper) {
                 Mapped::Rename(to) => {
                     self.replace(a.name_span.0, a.name_span.1, to);
                     written.insert(to.to_string());
@@ -1223,6 +2138,15 @@ impl<'a> Writer<'a> {
                     if fits {
                         self.replace(a.name_span.0, a.name_span.1, to);
                         written.insert(to.to_string());
+
+                        // Vide types each event's handler by its signal, so a
+                        // `() -> ()` for `Activated` fails the type check.
+                        if let (true, Value::Expr(s, t)) = (self.opts.factory.table, a.value) {
+                            self.uses_on = true;
+                            let on = format!("{}_on(", self.opts.helper);
+                            self.insert(s, RANK_WRAP_OPEN, on);
+                            self.insert(t, RANK_WRAP_CLOSE, ")");
+                        }
                     } else {
                         self.find(
                             "no_effect",
@@ -1236,10 +2160,12 @@ impl<'a> Writer<'a> {
                 Mapped::Props(list) => {
                     let text = list
                         .iter()
-                        .map(|(k, v)| format!("{k}={{{v}}}"))
+                        .map(|(k, v)| format!("{k}={{{}}}", self.live(v)))
                         .collect::<Vec<_>>()
                         .join(" ");
+                    self.uses_not |= text.contains(&format!("{}_not(", self.opts.helper));
                     self.replace(a.span.0, a.span.1, text);
+                    self.cover_span(a.span);
 
                     for (k, _) in list {
                         written.insert(k.to_string());
@@ -1261,7 +2187,10 @@ impl<'a> Writer<'a> {
                     self.find(
                         "unknown_attribute",
                         a.name_span,
-                        format!("Silk does not know `{}` on `<{}>`; it sets nothing", a.name, tag.name),
+                        format!(
+                            "Silk does not know `{}` on `<{}>`; it sets nothing",
+                            a.name, tag.name
+                        ),
                     );
                     self.remove_attr(a.span);
                 }
@@ -1313,6 +2242,30 @@ impl<'a> Writer<'a> {
                         self.remove_attr(a.span);
                     }
 
+                    n if html::is_change(n) => {
+                        change = Some(raw.luau());
+                        change_span = Some(a.span);
+                    }
+
+                    n if n.eq_ignore_ascii_case("maxlength") => {
+                        limit = Some(raw.luau().trim_matches('"').to_string());
+                        self.remove_attr(a.span);
+                    }
+
+                    "style" if !in_place.is_empty() => {
+                        let text = in_place
+                            .iter()
+                            .map(|(k, v)| format!("{k}={{{v}}}"))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        self.replace(a.span.0, a.span.1, text);
+                        self.cover_span(a.span);
+
+                        for (k, _) in &in_place {
+                            written.insert((*k).to_string());
+                        }
+                    }
+
                     _ => self.remove_attr(a.span),
                 },
             }
@@ -1343,19 +2296,121 @@ impl<'a> Writer<'a> {
         m.opacity = style.opacity;
         props::finish_colors(&mut m, target, false);
 
+        if sliced && m.get("ScaleType").is_none() {
+            m.set("ScaleType", "Enum.ScaleType.Slice");
+        }
+
+        // A Luau value for a modifier goes to its child. The child stands
+        // past the open tag, and an edit keeps its line count, so a value
+        // on more than one line stays out.
+        let mut live: HashSet<&'static str> = HashSet::new();
+
+        for (name, value, span) in &dynamic {
+            let (class, key) = match name.as_str() {
+                "scale" => ("UIScale", "Scale"),
+
+                "border-color" => ("UIStroke", "Color"),
+
+                "border-width" => ("UIStroke", "Thickness"),
+
+                "border-transparency" => ("UIStroke", "Transparency"),
+
+                "background-gradient" => ("UIGradient", "Color"),
+
+                "gradient-rotation" => ("UIGradient", "Rotation"),
+
+                "gradient-transparency" => ("UIGradient", "Transparency"),
+
+                _ => continue,
+            };
+
+            if value.contains('\n') {
+                self.find(
+                    "dynamic_style",
+                    *span,
+                    format!("a value for `{name}` on more than one line cannot move to its {class}; bind it to a local and write the name"),
+                );
+
+                continue;
+            }
+
+            m.modifier(class, key, value.clone());
+            live.insert(class);
+
+            if class == "UIStroke" {
+                m.modifier(class, "ApplyStrokeMode", "Enum.ApplyStrokeMode.Border");
+            }
+        }
+
+        // A live gradient takes its direction from `gradientRotation`, or
+        // from an Enamel direction class, `bg-gradient-to-b`. Silk writes
+        // the one UIGradient, so the class leaves the list Enamel reads.
+        // The box shows white under it, as a CSS gradient shows.
+        if dynamic
+            .iter()
+            .any(|(n, v, _)| n == "background-gradient" && !v.contains('\n'))
+        {
+            let rotated = m
+                .mods
+                .iter()
+                .any(|(c, p)| *c == "UIGradient" && p.iter().any(|(k, _)| k == "Rotation"));
+
+            if let Some((span, deg)) = self.gradient_direction(i).filter(|_| self.opts.enamel) {
+                if !rotated {
+                    m.modifier("UIGradient", "Rotation", css::num(deg));
+                }
+
+                self.replace(span.0, span.1, "");
+            }
+
+            let shown = m.get("BackgroundColor3").is_some()
+                || replaced.contains("BackgroundColor3")
+                || written.contains("BackgroundColor3");
+
+            if !shown {
+                m.set("BackgroundColor3", "Color3.new(1, 1, 1)");
+                m.set("BackgroundTransparency", "0");
+            }
+        }
+
         if let Some(base) = base_size {
             let w = style.width.unwrap_or(base.0);
             let h = style.height.unwrap_or(base.1);
+            let named = |size: &str, auto: &str| (replaced.contains(size), replaced.contains(auto));
+            let x = named(crate::enamel::SIZE_X, crate::enamel::AUTO_X);
+            let y = named(crate::enamel::SIZE_Y, crate::enamel::AUTO_Y);
+
             let (size, auto) = props::size_props(w, h);
             m.set("Size", size);
-            m.set("AutomaticSize", auto);
+
+            if x.0 || x.1 || y.0 || y.1 {
+                // Enamel sets the axes its classes name inside Silk's
+                // `Size`, and writes `AutomaticSize` from `w-auto` and
+                // `h-auto` alone. So Silk passes its own automatic axis on
+                // as that class, and writes no `AutomaticSize` itself.
+                let more: String = [("w", x, w), ("h", y, h)]
+                    .iter()
+                    .filter(|(_, (sized, auto), value)| !sized && !auto && *value == Axis::Auto)
+                    .map(|(axis, ..)| format!(" {axis}-auto"))
+                    .collect();
+
+                // An `AutomaticSize` the author writes wins.
+                if let Some(t) = class_end
+                    && !more.is_empty()
+                    && !written.contains("AutomaticSize")
+                {
+                    self.insert(t, RANK_TEXT, more);
+                }
+            } else {
+                m.set("AutomaticSize", auto);
+            }
 
             // A rule of the file may give the height.
             let ruled = static_decls
                 .iter()
                 .any(|d| matches!(d.name.as_str(), "height" | "max-height"));
 
-            if scroll.is_some() && matches!(h, Axis::Auto) && !ruled {
+            if scroll.is_some() && matches!(h, Axis::Auto) && !ruled && !y.0 {
                 self.find("scroll_height", e.name_span, "a ScrollingFrame with an automatic height grows with its content and never scrolls; give it a `height`");
             }
         }
@@ -1370,7 +2425,7 @@ impl<'a> Writer<'a> {
             m.set("ScrollBarThickness", "6");
         }
 
-        if text_class && (!enamel_font || style.font.is_set()) {
+        if text_class {
             base_font = FontParts {
                 family: style.font.family.clone().or(base_font.family),
                 weight: style.font.weight.or(base_font.weight),
@@ -1416,6 +2471,13 @@ impl<'a> Writer<'a> {
 
         // ---- the order of the children
         let has_holes = !holes.is_empty();
+        // A hole in a box is a child, as `{children}` is, and not text. So
+        // is a hole beside a `Text` the author wrote, and a hole beside an
+        // element that stands as an instance of its own with no text:
+        // `<button>{icon}<span className="x">b</span></button>`.
+        let holes_are_children = matches!(kind, Kind::Block | Kind::List | Kind::Table | Kind::Row)
+            || written.contains("Text")
+            || (!holds_text && !boxes.is_empty());
         let flow = matches!(kind, Kind::Block | Kind::List | Kind::Table) || demoted || button_row;
         // A table row orders its cells; the table's layout places them.
         let ordered = flow || kind == Kind::Row;
@@ -1470,13 +2532,25 @@ impl<'a> Writer<'a> {
                     rich |= !wraps.is_empty();
                 }
 
-                let content =
-                    holds_text || has_holes || marker.is_some() || written.contains("Text");
-                let nodes = !m.mods.is_empty() || !boxes.is_empty() || (flow && !boxes.is_empty());
+                let content = holds_text
+                    || (has_holes && !holes_are_children)
+                    || marker.is_some()
+                    || written.contains("Text");
+                // Enamel adds modifier and layout children of its own.
+                let enamel_children = replaced
+                    .iter()
+                    .any(|k| k.starts_with("UI") || k.starts_with("layout:"));
+                let nodes = !m.mods.is_empty() || !boxes.is_empty() || enamel_children;
 
                 // Holes alone beside element children are ambiguous to the
                 // markup compiler; one hole moves to `Text`.
-                if !holds_text && marker.is_none() && wraps.is_empty() && has_holes && nodes {
+                if !holds_text
+                    && marker.is_none()
+                    && wraps.is_empty()
+                    && has_holes
+                    && nodes
+                    && !holes_are_children
+                {
                     let exprs: Vec<String> = holes
                         .iter()
                         .map(|(s, t)| src[s + 1..t - 1].trim().to_string())
@@ -1521,22 +2595,50 @@ impl<'a> Writer<'a> {
             self.escape_holes(i, None);
         }
 
-        // The children get their order: boxes and anonymous text. The
+        // The holes that stand as children, not inside a run of text.
+        let child_holes: Vec<(usize, usize)> = holes
+            .iter()
+            .filter(|(s, t)| holes_are_children && !runs.iter().any(|(a, b)| a <= s && t <= b))
+            .copied()
+            .collect();
+
+        // In a class with a `Text` property the markup compiler reads a
+        // hole as text; a fragment keeps it a child.
+        if text_class {
+            for (s, t) in &child_holes {
+                self.insert(*s, RANK_WRAP_OPEN, "<>");
+                self.insert(*t, RANK_WRAP_CLOSE, "</>");
+            }
+        }
+
+        // The children get their order: boxes, anonymous text, and holes,
+        // which set the order on what they hold through the helper. The
         // rows of a table's `thead` and `tbody` are the table's.
-        if ordered && !has_holes {
+        if ordered {
+            enum Slot {
+                Element(usize),
+                Run,
+                Hole(usize),
+            }
+
             let mut k = 0;
-            let mut slots: Vec<(usize, Option<usize>)> = Vec::new();
+            let mut slots: Vec<(usize, Slot)> = Vec::new();
+            let step = match child_holes.is_empty() {
+                true => 1,
+
+                false => HOLE_STEP,
+            };
 
             for c in &e.children {
                 match c {
                     Child::Element(x) if self.tag(*x).is_some_and(|t| t.kind == Kind::Group) => {
                         for row in self.m.element_children(*x) {
-                            slots.push((self.el(row).start, Some(row)));
+                            slots.push((self.el(row).start, Slot::Element(row)));
                         }
                     }
 
                     Child::Element(x) if boxes.contains(x) => {
-                        slots.push((self.el(*x).start, Some(*x)))
+                        slots.push((self.el(*x).start, Slot::Element(*x)))
                     }
 
                     _ => {}
@@ -1544,7 +2646,11 @@ impl<'a> Writer<'a> {
             }
 
             for (s, _) in &runs {
-                slots.push((*s, None));
+                slots.push((*s, Slot::Run));
+            }
+
+            for (s, t) in &child_holes {
+                slots.push((*s, Slot::Hole(*t)));
             }
 
             slots.sort_by_key(|(at, _)| *at);
@@ -1552,21 +2658,30 @@ impl<'a> Writer<'a> {
 
             for (at, x) in slots {
                 k += 1;
+                let order = k * step;
 
                 match x {
-                    Some(x) => {
-                        self.order.insert(x, k);
+                    Slot::Element(x) => {
+                        self.order.insert(x, order);
                     }
 
-                    None => {
-                        run_orders.insert(at, k);
+                    Slot::Run => {
+                        run_orders.insert(at, order);
+                    }
+
+                    Slot::Hole(t) => {
+                        self.uses_order = true;
+                        let open = format!("{}_order(", self.opts.helper);
+                        self.insert(at + 1, RANK_ORDER_OPEN, open);
+                        let tail = self.live(&format!("{order})"));
+                        self.insert(t - 1, RANK_ORDER_CLOSE, format!(", {tail}"));
                     }
                 }
             }
 
-            self.write_runs(i, &runs, &run_orders, tag, &style);
+            self.write_runs(i, &runs, &run_orders, tag, &run_style);
         } else if wrap_runs {
-            self.write_runs(i, &runs, &HashMap::new(), tag, &style);
+            self.write_runs(i, &runs, &HashMap::new(), tag, &run_style);
         }
 
         // A box holds no text: a space between two boxes, or a break with
@@ -1605,6 +2720,7 @@ impl<'a> Writer<'a> {
         } else if flow
             && !enamel_layout
             && layout_kind != Some(Layout::None)
+            && !(placed && matches!(layout_kind, None | Some(Layout::Flow)))
             && (!e.children.is_empty())
         {
             let class_name = match layout_kind {
@@ -1618,8 +2734,14 @@ impl<'a> Writer<'a> {
             )];
 
             if button_row {
-                props.push(("FillDirection".into(), "Enum.FillDirection.Horizontal".into()));
-                props.push(("VerticalAlignment".into(), "Enum.VerticalAlignment.Center".into()));
+                props.push((
+                    "FillDirection".into(),
+                    "Enum.FillDirection.Horizontal".into(),
+                ));
+                props.push((
+                    "VerticalAlignment".into(),
+                    "Enum.VerticalAlignment.Center".into(),
+                ));
                 props.push(("Padding".into(), "UDim.new(0, 4)".into()));
             }
 
@@ -1630,21 +2752,88 @@ impl<'a> Writer<'a> {
             None
         };
 
+        // The viewport scales the body about the middle of the screen.
+        if self.viewports.contains_key(&i) {
+            m.set("AnchorPoint", "Vector2.new(0.5, 0.5)");
+            m.set("Position", "UDim2.fromScale(0.5, 0.5)");
+        }
+
         // ---- write the element
         let mut generated: Vec<(String, String)> = extra;
         generated.extend(m.props.iter().cloned());
-        generated.retain(|(k, _)| !written.contains(k));
+        generated.retain(|(k, _)| !written.contains(k) && !replaced.contains(k));
         let mut seen = HashSet::new();
         generated.retain(|(k, _)| seen.insert(k.clone()));
 
-        let attrs: String = generated
+        let mut attrs: String = generated
             .iter()
             .map(|(k, v)| format!(" {k}={{{v}}}"))
             .collect();
-        self.replace(e.name_span.0, e.name_span.1, format!("{class}{attrs}"));
+
+        // The helper takes the tags, a link, a change handler, and a limit.
+        let tags = match (&tags_expr, !class_tokens.is_empty()) {
+            (Some(x), _) => Some(x.clone()),
+
+            (None, true) => Some(format!("\"{}\"", class_tokens.join(" "))),
+
+            _ => None,
+        }
+        .filter(|_| self.opts.tags);
+        let tagged = tags.is_some() || href.is_some() || change.is_some() || limit.is_some();
+        let nil = || "nil".to_string();
+        let helper_args = format!(
+            "{}, {}, {}, {}",
+            tags.unwrap_or_else(nil),
+            href.unwrap_or_else(nil),
+            change.clone().unwrap_or_else(nil),
+            limit.clone().unwrap_or_else(nil)
+        );
+        let viewport = self.viewports.get(&i).cloned();
+
+        // In the element form an element is no instance, so React hands
+        // the instance to the helpers as one `ref`, through a spread.
+        if !self.opts.factory.table && (tagged || viewport.is_some()) {
+            let fit = viewport.as_ref().map(|vp| {
+                self.uses_viewport = true;
+
+                format!("{}_viewport({})", self.opts.helper, vp.args())
+            });
+            let reference = match tagged {
+                true => {
+                    self.uses_helper = true;
+
+                    format!(
+                        "{}(nil, {helper_args}, {})",
+                        self.opts.helper,
+                        fit.unwrap_or_else(nil)
+                    )
+                }
+
+                false => fit.unwrap_or_else(nil),
+            };
+            let spread = format!("{{{{ ref = {reference} }}}}");
+
+            match change_span.take() {
+                Some(span) => {
+                    self.replace(span.0, span.1, spread);
+                    self.cover_span(span);
+                }
+
+                None => attrs.push_str(&format!(" {spread}")),
+            }
+        }
+
+        // Vide's factory has no VideoFrame and no Sound either.
+        let (open_tag, close_tag) =
+            match self.opts.factory.table && matches!(class, "VideoFrame" | "Sound") {
+                true => (self.child_tag(class), format!("{}_child", self.opts.helper)),
+
+                false => (class.to_string(), class.to_string()),
+            };
+        self.replace(e.name_span.0, e.name_span.1, format!("{open_tag}{attrs}"));
 
         if let Some((s, _)) = e.close {
-            self.replace(s + 2, s + 2 + e.name.len(), class);
+            self.replace(s + 2, s + 2 + e.name.len(), close_tag.clone());
         }
 
         let mut children = String::new();
@@ -1657,12 +2846,46 @@ impl<'a> Writer<'a> {
         {
             let explicit = self.m.element_children(i).any(|k| self.el(k).name == *c);
 
-            if explicit {
+            // A modifier inside another one, `UIStroke.UIGradient`, goes
+            // into its outer child below.
+            if explicit || c.contains('.') {
                 continue;
             }
 
-            let p: String = props.iter().map(|(k, v)| format!(" {k}={{{v}}}")).collect();
-            children.push_str(&format!("<{c}{p} />"));
+            let inner: String = m
+                .mods
+                .iter()
+                .filter_map(|(k, props)| Some((k.strip_prefix(c)?.strip_prefix('.')?, props)))
+                .map(|(class, props)| {
+                    let p: String = props.iter().map(|(k, v)| format!(" {k}={{{v}}}")).collect();
+
+                    (class, p)
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|(class, p)| format!("<{}{p} />", self.child_tag(class)))
+                .collect();
+
+            let mut p: String = props.iter().map(|(k, v)| format!(" {k}={{{v}}}")).collect();
+            let tag = self.child_tag(c);
+
+            // The child component builds a child with a live value through
+            // the project's factory, which binds a source.
+            if let Some(create) = &self.opts.factory.create
+                && live.contains(c)
+                && self.opts.factory.table
+            {
+                p.push_str(&format!(" Make={{{create}}}"));
+            }
+
+            match inner.is_empty() {
+                true => children.push_str(&format!("<{tag}{p} />")),
+
+                false => {
+                    let close = tag.split(' ').next().unwrap_or(&tag).to_string();
+                    children.push_str(&format!("<{tag}{p}>{inner}</{close}>"));
+                }
+            }
         }
 
         match e.self_close {
@@ -1670,55 +2893,150 @@ impl<'a> Writer<'a> {
                 let text = match children.is_empty() {
                     true => "/>".to_string(),
 
-                    false => format!(">{children}</{class}>"),
+                    false => format!(">{children}</{close_tag}>"),
                 };
                 self.replace(s, t, text);
             }
 
-            None if !children.is_empty() => self.insert(e.open_end, RANK_RUN_OPEN - 5, children),
+            None if !children.is_empty() => {
+                self.insert(e.open_end, RANK_CHILDREN, children);
+                self.with_children.insert(i);
+            }
 
             None => {}
         }
 
-        // ---- the helper: tags and a link
-        let tags = match (&tags_expr, self.opts.tags && !class_tokens.is_empty()) {
-            (Some(x), _) => Some(x.clone()),
-
-            (None, true) => Some(format!("\"{}\"", class_tokens.join(" "))),
-
-            _ => None,
-        };
-
-        if tags.is_some() && !self.opts.tags {
-            // Tags are off; nothing to wrap.
+        if let Some(span) = change_span {
+            self.remove_attr(span);
         }
 
-        let tags = tags.filter(|_| self.opts.tags);
+        // ---- the helper: tags, a link, a change, and the viewport. The
+        // table form builds the element inside a function the helper calls
+        // once: the markup compiler reads markup outside a function in a
+        // child as a condition that never updates.
+        if self.opts.factory.table && (tagged || viewport.is_some()) {
+            let (open, close) = self.hole_braces(i);
+            let mut pre = open.to_string();
+            let mut post = String::new();
 
-        if tags.is_some() || href.is_some() {
-            self.uses_helper = true;
-            let (open, close) = match e.in_children {
-                true => ("{", "}"),
+            if let Some(vp) = &viewport {
+                self.uses_viewport = true;
+                pre.push_str(&format!(
+                    "{}_viewport({}, function() return ",
+                    self.opts.helper,
+                    vp.args()
+                ));
+                post = " end)".into();
+            }
 
-                false => ("", ""),
+            if tagged {
+                self.uses_helper = true;
+                pre.push_str(&format!("{}(function() return ", self.opts.helper));
+                post = format!(" end, {helper_args}){post}");
+            }
+
+            self.insert(e.start, RANK_WRAP_OPEN, pre);
+            self.insert(e.end, RANK_WRAP_CLOSE, format!("{post}{close}"));
+        }
+    }
+
+    /// The span of an Enamel direction class in the class list of an
+    /// element, `bg-gradient-to-b`, and the rotation it names, as Enamel
+    /// reads it.
+    fn gradient_direction(&self, i: usize) -> Option<((usize, usize), f64)> {
+        let e = self.el(i);
+        let (s, t) = ["className", "class"]
+            .iter()
+            .find_map(|n| match e.attr(n)?.value {
+                Value::Str(s, t) => Some((s, t)),
+
+                _ => None,
+            })?;
+        let text = &self.src[s..t];
+        let mut at = 0;
+
+        for word in text.split_whitespace() {
+            let start = at + text[at..].find(word)?;
+            at = start + word.len();
+            let Some(side) = word.strip_prefix("bg-gradient-to-") else {
+                continue;
             };
-            // The element builds inside a function the helper calls once:
-            // the markup compiler reads markup outside a function in a
-            // child as a condition that never updates.
-            self.insert(
-                e.start,
-                RANK_WRAP_OPEN,
-                format!("{open}{}(function() return ", self.opts.helper),
-            );
-            self.insert(
-                e.end,
-                RANK_WRAP_CLOSE,
-                format!(
-                    " end, {}, {}){close}",
-                    tags.unwrap_or_else(|| "nil".into()),
-                    href.unwrap_or_else(|| "nil".into())
-                ),
-            );
+            let deg = match side {
+                "r" => 0.0,
+                "br" => 45.0,
+                "b" => 90.0,
+                "bl" => 135.0,
+                "l" => 180.0,
+                "tl" => 225.0,
+                "t" => 270.0,
+                "tr" => 315.0,
+                _ => continue,
+            };
+
+            return Some(((s + start, s + at), deg));
+        }
+
+        None
+    }
+
+    /// The end of a call of the negation, the escape, or the order
+    /// helper, with the `compute` of the factory as its last argument
+    /// when the project sets one. The helper derives a Fusion state
+    /// through it, as Alloy derives text.
+    fn live(&self, call: &str) -> String {
+        match (&self.opts.factory.compute, call.strip_suffix(')')) {
+            (Some((compute, _)), Some(head))
+                if call == ")"
+                    || call.starts_with(&format!("{}_not(", self.opts.helper))
+                    || head.parse::<usize>().is_ok() =>
+            {
+                format!("{head}, {compute})")
+            }
+
+            _ => call.to_string(),
+        }
+    }
+
+    /// The tag for a child Silk adds, a UIPadding or a StyleLink. In the
+    /// table form the child component makes it: Vide types its factory
+    /// over 19 classes, so `create("UIPadding")` fails the type check.
+    fn child_tag(&mut self, class: &str) -> String {
+        match self.opts.factory.table {
+            true => {
+                self.uses_child = true;
+
+                format!("{}_child Class=\"{class}\"", self.opts.helper)
+            }
+
+            false => class.to_string(),
+        }
+    }
+
+    /// The text around the helper call that stands for element `i`. Among
+    /// children it is a `{ }` hole. In a class with a `Text` property the
+    /// markup compiler reads a hole as text, so a fragment holds it there
+    /// and it stays a child. The markup of the element then stands in the
+    /// hole, and [`Writer::guard_text`] keeps its text readable there.
+    fn hole_braces(&mut self, i: usize) -> (&'static str, &'static str) {
+        let e = self.el(i);
+        let in_text = e.parent.is_some_and(|p| {
+            self.text_boxes.contains(&p)
+                || matches!(
+                    self.el(p).name.as_str(),
+                    "TextLabel" | "TextButton" | "TextBox"
+                )
+        });
+
+        if e.in_children {
+            self.in_holes.push((e.start, e.end));
+        }
+
+        match (e.in_children, in_text) {
+            (true, true) => ("<>{", "}</>"),
+
+            (true, false) => ("{", "}"),
+
+            (false, _) => ("", ""),
         }
     }
 
@@ -1840,8 +3158,9 @@ impl<'a> Writer<'a> {
 
             self.uses_rich = true;
             let helper = format!("{}_rich(", self.opts.helper);
+            let close = self.live(")");
             self.insert(s + 1, RANK_WRAP_OPEN, helper);
-            self.insert(t - 1, RANK_WRAP_CLOSE, ")");
+            self.insert(t - 1, RANK_WRAP_CLOSE, close);
         }
     }
 
@@ -2025,7 +3344,10 @@ impl<'a> Writer<'a> {
         let (mut open, mut close) = match tag.name {
             // Code takes the project's monospace family.
             "code" | "kbd" | "samp" | "tt" => (
-                format!("<font face=\"{}\">", props::rich_face(&self.opts.fonts.mono)),
+                format!(
+                    "<font face=\"{}\">",
+                    props::rich_face(&self.opts.fonts.mono)
+                ),
                 "</font>".to_string(),
             ),
 
@@ -2309,9 +3631,13 @@ impl<'a> Writer<'a> {
             // In a row a run sizes to its text; in a stack it takes the
             // width and wraps.
             let size = match self.row_parents.contains(&i) {
-                true => "Size={UDim2.new()} AutomaticSize={Enum.AutomaticSize.XY} TextWrapped={false}",
+                true => {
+                    "Size={UDim2.new()} AutomaticSize={Enum.AutomaticSize.XY} TextWrapped={false}"
+                }
 
-                false => "Size={UDim2.fromScale(1, 0)} AutomaticSize={Enum.AutomaticSize.Y} TextWrapped={true}",
+                false => {
+                    "Size={UDim2.fromScale(1, 0)} AutomaticSize={Enum.AutomaticSize.Y} TextWrapped={true}"
+                }
             };
 
             if rich {
@@ -2327,6 +3653,87 @@ impl<'a> Writer<'a> {
             self.insert(*s, RANK_RUN_OPEN, open);
             self.insert(*t, RANK_RUN_CLOSE, "</TextLabel>");
         }
+    }
+}
+
+/// What `<meta name="viewport">` asks for: the body laid out at a design
+/// size and scaled to the screen, as HTML's viewport scales a page.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Viewport {
+    /// The design size in pixels; `device-width` leaves it unset.
+    pub width: Option<f64>,
+    pub height: Option<f64>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    /// The scale with no design size: `initial-scale`.
+    pub initial: Option<f64>,
+}
+
+impl Viewport {
+    /// Reads `width=1280, height=720, minimum-scale=0.5, maximum-scale=2`.
+    /// Returns `None` when nothing scales, as for `width=device-width,
+    /// initial-scale=1`, and the problems of the text.
+    pub fn parse(content: &str) -> (Option<Self>, Vec<String>) {
+        let mut v = Self::default();
+        let mut problems = Vec::new();
+
+        for part in content.split([',', ';']) {
+            let Some((key, value)) = part.split_once('=') else {
+                if !part.trim().is_empty() {
+                    problems.push(format!("`{}` is not a `key=value` pair", part.trim()));
+                }
+
+                continue;
+            };
+            let key = key.trim().to_ascii_lowercase();
+            let value = value.trim();
+            let number = value.trim_end_matches("px").parse::<f64>().ok();
+            let slot = match key.as_str() {
+                "width" if value == "device-width" => continue,
+
+                "height" if value == "device-height" => continue,
+
+                "width" => &mut v.width,
+
+                "height" => &mut v.height,
+
+                "minimum-scale" | "min-scale" => &mut v.min,
+
+                "maximum-scale" | "max-scale" => &mut v.max,
+
+                "initial-scale" => &mut v.initial,
+
+                // A player cannot zoom a Roblox UI.
+                "user-scalable" | "interactive-widget" | "viewport-fit" => continue,
+
+                _ => {
+                    problems.push(format!(
+                        "`{key}` is not a viewport key Silk reads: `width`, `height`, `minimum-scale`, `maximum-scale`, `initial-scale`"
+                    ));
+
+                    continue;
+                }
+            };
+
+            match number.filter(|n| *n > 0.0) {
+                Some(n) => *slot = Some(n),
+
+                None => problems.push(format!("`{key}` takes a number above 0, not `{value}`")),
+            }
+        }
+
+        let scales = v.width.is_some() || v.height.is_some() || v.initial.is_some_and(|s| s != 1.0);
+
+        (scales.then_some(v), problems)
+    }
+
+    /// The arguments of the viewport helper.
+    fn args(&self) -> String {
+        [self.width, self.height, self.min, self.max, self.initial]
+            .iter()
+            .map(|n| n.map_or("nil".to_string(), css::num))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -2487,6 +3894,150 @@ fn luau_string(text: &str) -> String {
     format!("\"{body}\"")
 }
 
+/// Whether a Luau reader reads markup text as it stands: every quote
+/// closes on its line, and no backtick, brace, `--`, or `[[` or `[=`
+/// opens a string, a hole, or a comment. The markup compiler reads a
+/// `{ }` hole that way to find its end.
+fn luau_safe(text: &str) -> bool {
+    let b = text.as_bytes();
+    let mut i = 0;
+
+    while i < b.len() {
+        match b[i] {
+            b'{' | b'}' | b'`' => return false,
+
+            b'-' if b.get(i + 1) == Some(&b'-') => return false,
+
+            b'[' if matches!(b.get(i + 1), Some(b'[' | b'=')) => return false,
+
+            q @ (b'"' | b'\'') => {
+                i += 1;
+
+                loop {
+                    match b.get(i) {
+                        Some(b'\\') => i += 2,
+
+                        Some(c) if *c == q => break,
+
+                        None | Some(b'\n') => return false,
+
+                        Some(_) => i += 1,
+                    }
+                }
+            }
+
+            _ => {}
+        }
+
+        i += 1;
+    }
+
+    true
+}
+
+/// Markup text with its escapes decoded, as the markup compiler decodes
+/// them: `\{`, `\}`, `` \` ``, `\\`, and `\<` give the character, and a
+/// backslash before any other keeps it.
+fn decode_markup(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match (c, chars.peek()) {
+            ('\\', Some(&n @ ('{' | '}' | '`' | '\\' | '<'))) => {
+                out.push(n);
+                chars.next();
+            }
+
+            (c, _) => out.push(c),
+        }
+    }
+
+    out
+}
+
+/// Markup text with its lines joined, as the markup compiler joins them:
+/// text on one line stays as it is; on more lines, each line loses the
+/// space at its ends, the empty lines go, and one space joins the rest.
+fn normalise(raw: &str) -> String {
+    if !raw.contains('\n') {
+        return raw.to_string();
+    }
+
+    let lines: Vec<&str> = raw.split('\n').collect();
+    let last = lines.len() - 1;
+
+    lines
+        .iter()
+        .enumerate()
+        .map(|(n, line)| {
+            let line = if n > 0 { line.trim_start() } else { line };
+
+            if n < last { line.trim_end() } else { line }
+        })
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Joined text as markup that a Luau reader reads as it stands. `whole`
+/// writes one string in a hole. Else each risky character goes in a hole
+/// of its own, and the rest stays text, so a text class beside a child
+/// element still has text. The `lines` of the span go inside the last
+/// hole, where they change no space of the text.
+fn guarded(words: &str, whole: bool, lines: usize) -> String {
+    let pad = "\n".repeat(lines);
+
+    if whole {
+        return format!("{{{}{pad}}}", luau_string(words));
+    }
+
+    let mut out = String::new();
+    let mut hole = String::new();
+    let mut prev: Option<char> = None;
+    let flush = |out: &mut String, hole: &mut String| {
+        if !hole.is_empty() {
+            out.push_str(&format!("{{{}}}", luau_string(hole)));
+            hole.clear();
+        }
+    };
+
+    for c in words.chars() {
+        let risky = matches!(c, '\'' | '"' | '`' | '{' | '}')
+            || (c == '-' && prev == Some('-'))
+            || (matches!(c, '[' | '=') && prev == Some('['));
+
+        if risky {
+            hole.push(c);
+            prev = None;
+
+            continue;
+        }
+
+        flush(&mut out, &mut hole);
+
+        match c {
+            '\\' => out.push_str("\\\\"),
+
+            '<' => out.push_str("\\<"),
+
+            c => out.push(c),
+        }
+
+        prev = Some(c);
+    }
+
+    flush(&mut out, &mut hole);
+
+    match out.rfind('}') {
+        Some(at) => out.insert_str(at, &pad),
+
+        None => out.push_str(&pad),
+    }
+
+    out
+}
+
 /// `text` with the newlines `original` had, so the file keeps its lines.
 fn pad(original: &str, mut text: String) -> String {
     let want = original.matches('\n').count();
@@ -2499,26 +4050,46 @@ fn pad(original: &str, mut text: String) -> String {
     text
 }
 
-/// The helper as one line of Alloy: it tags an element and connects a
-/// link. A link finds its target by `Name` from the top of its UI tree,
-/// as `#id` finds an element in the document, and scrolls the target's
-/// nearest ScrollingFrame to it; `#` scrolls the link's own to the top.
-/// The helper needs a target whose elements are instances, as Vide and
-/// Fusion build them.
+/// The helper as one line of Alloy: it tags an element, connects a link,
+/// and listens to the text of an input for `onChange` and `maxLength`,
+/// as React runs `onChange` on each key. A link finds its target by
+/// `Name` from the top of its UI tree, as `#id` finds an element in the
+/// document, and scrolls the target's nearest ScrollingFrame to it; `#`
+/// scrolls the link's own to the top.
+///
+/// The table form calls it with `make`, which builds the element. The
+/// element form calls it with nil, and it returns the function React
+/// calls as a `ref`, again on each render. So it connects once for each
+/// instance and keeps the latest handler, as React does. `after` is
+/// another `ref` of the element, the viewport's.
 pub fn helper_text(helper: &str) -> String {
     format!(
-        "local function {helper}(make: () -> any, tags: string?, href: string?): any \
-local el = make() \
+        "local {helper}_state: {{ [any]: any }} = setmetatable({{}}, {{ __mode = \"k\" }}) :: any \
+local function {helper}(make: any, tags: string?, href: string?, change: any, limit: number?, after: any): any \
+local function apply(value: any): any \
+if after ~= nil then local fit: any = after fit(value) end \
+if typeof(value) ~= \"Instance\" then return value end \
+local el: any = value \
+local s: any = {helper}_state[el] local first = s == nil \
+if first then s = {{}} {helper}_state[el] = s end \
+s.change = change s.limit = limit s.href = href \
 if tags ~= nil then for tag in string.gmatch(tags, \"%S+\") do el:AddTag(tag) end end \
-if href ~= nil then el.Activated:Connect(function() \
+if first and (change ~= nil or limit ~= nil) then el:GetPropertyChangedSignal(\"Text\"):Connect(function() \
+local cut = if s.limit ~= nil then utf8.offset(el.Text, s.limit + 1) else nil \
+if cut ~= nil and cut <= #el.Text then el.Text = string.sub(el.Text, 1, cut - 1) return end \
+local call: any = s.change if s.change ~= nil then call(el.Text) end end) end \
+if first and href ~= nil then el.Activated:Connect(function() \
+local link: string = s.href \
 local root = el while root.Parent ~= nil and root.Parent:IsA(\"GuiBase2d\") do root = root.Parent end \
-local target = if href == \"\" then nil else root:FindFirstChild(href, true) \
-if href ~= \"\" and target == nil then return end \
+local target = if link == \"\" then nil else root:FindFirstChild(link, true) \
+if link ~= \"\" and target == nil then return end \
 local frame = (target or el).Parent while frame ~= nil and not frame:IsA(\"ScrollingFrame\") do frame = frame.Parent end \
 if frame == nil then return end \
 local at = if target ~= nil then target.AbsolutePosition - frame.AbsolutePosition + frame.CanvasPosition else Vector2.zero \
 frame.CanvasPosition = Vector2.new(math.max(at.X, 0), math.max(at.Y, 0)) end) end \
-return el end "
+return el end \
+if make == nil then return apply end \
+local build: any = make return apply(build()) end "
     )
 }
 
@@ -2526,8 +4097,8 @@ return el end "
 /// sheet once, however often the component renders.
 pub fn sheet_text(helper: &str) -> String {
     format!(
-        "local {helper}_sheets: {{ [string]: Instance }} = {{}} \
-local function {helper}_sheet(id: string, rules: {{ {{ any }} }}): Instance \
+        "local {helper}_sheets: {{ [string]: StyleSheet }} = {{}} \
+local function {helper}_sheet(id: string, rules: {{ {{ any }} }}): StyleSheet \
 local sheet = {helper}_sheets[id] if sheet ~= nil then return sheet end \
 sheet = Instance.new(\"StyleSheet\") sheet.Name = id \
 for _, r in rules do local rule = Instance.new(\"StyleRule\") rule.Selector = r[1] rule.Priority = r[2] rule:SetProperties(r[3]) rule.Parent = sheet end \
@@ -2561,18 +4132,174 @@ pub fn helper_at(source: &str) -> usize {
         // line's end; the prelude goes on the next line.
         let comment = at + skipped;
         let end = crate::markup::skip_comment(source, comment);
-        at = source[end..].find('\n').map_or(source.len(), |n| end + n + 1);
+        at = source[end..]
+            .find('\n')
+            .map_or(source.len(), |n| end + n + 1);
     }
 }
 
 /// The escape helper as one line of Alloy: a value in RichText shows its
-/// `<`, `>`, and `&` as themselves. A source reads through it.
+/// `<`, `>`, and `&` as themselves. A reactive value reads through it, as
+/// through the negation helper.
 pub fn rich_text(helper: &str) -> String {
     format!(
-        "local function {helper}_rich(v: any): any \
+        "local function {helper}_rich(v: any, compute: any?): any \
 if type(v) == \"function\" then local f: any = v return function() return {helper}_rich(f()) end end \
+if type(v) == \"table\" and v.map ~= nil then local b: any = v return b:map(function(x: any) return {helper}_rich(x) end) end \
+if type(v) == \"table\" and compute ~= nil then local derive: any = compute return derive(function(use: any) return {helper}_rich(use(v)) end) end \
 return (string.gsub(string.gsub(string.gsub(tostring(v), \"&\", \"&amp;\"), \"<\", \"&lt;\"), \">\", \"&gt;\")) end "
     )
+}
+
+/// The negation helper as one line of Alloy: `disabled={busy}` stays
+/// live when `busy` is reactive. A Vide or Fluid source is a function, a
+/// React binding maps, and a Fusion state derives through `compute`, the
+/// function of `[alx.factory] compute` that Silk passes when it is set.
+pub fn not_text(helper: &str) -> String {
+    format!(
+        "local function {helper}_not(v: any, compute: any?): any \
+if type(v) == \"function\" then local f: any = v return function() return not f() end end \
+if type(v) == \"table\" and v.map ~= nil then local b: any = v return b:map(function(x: any) return not x end) end \
+if type(v) == \"table\" and compute ~= nil then local derive: any = compute return derive(function(use: any) return not use(v) end) end \
+return not v end "
+    )
+}
+
+/// The order helper as one line of Alloy. It sets `LayoutOrder` on what
+/// a `{ }` child or a component gives: an instance, each instance of a
+/// list, or, for a function a reactive library runs again, what the
+/// function returns each time.
+///
+/// An item of a list takes its place in the list, unless it sets its
+/// own `LayoutOrder`. Vide's `values` gives its items in the order of a
+/// hash, and an item binds `LayoutOrder` to its index to keep the order
+/// of the list. So the helper adds the place of the hole to the order an
+/// item gives, and again each time the item changes it. `own` holds that
+/// order per item, and `false` for an item that gives none. An order of
+/// 1000 or more runs into the next place, as for [`HOLE_STEP`].
+pub fn order_text(helper: &str) -> String {
+    format!(
+        "local {helper}_own: {{ [any]: any }} = setmetatable({{}}, {{ __mode = \"k\" }}) :: any \
+local function {helper}_order(v: any, k: number, compute: any?): any \
+if type(v) == \"function\" then local f: any = v return function() return {helper}_order(f(), k) end end \
+if type(v) == \"table\" and compute ~= nil and v.type == \"State\" then local derive: any = compute return derive(function(use: any) return {helper}_order(use(v), k) end) end \
+if typeof(v) == \"Instance\" then local g: any = v if g:IsA(\"GuiObject\") then g.LayoutOrder = k end return v end \
+if type(v) ~= \"table\" then return v end \
+for n, c in ipairs(v) do local g: any = c if typeof(c) == \"Instance\" and g:IsA(\"GuiObject\") then \
+local s: any = {helper}_own[g] \
+if s == nil then s = if g.LayoutOrder ~= 0 then {{ own = g.LayoutOrder, base = k, wrote = 0 }} else false {helper}_own[g] = s \
+if s then g:GetPropertyChangedSignal(\"LayoutOrder\"):Connect(function() local t: any = {helper}_own[g] \
+if g.LayoutOrder ~= t.wrote then t.own = g.LayoutOrder t.wrote = t.base + t.own g.LayoutOrder = t.wrote end end) end end \
+if s then s.base = k s.wrote = k + s.own g.LayoutOrder = s.wrote else g.LayoutOrder = k + n - 1 end end end \
+return v end "
+    )
+}
+
+/// The child component as one line of Alloy, for the table form: it
+/// makes a child with `Instance.new`, so no typed factory call names its
+/// class. It connects a handler to a signal, as a VideoFrame takes one.
+/// With `Make`, the project's factory builds the child, so a source in a
+/// value stays live under Vide, Fluid, and Fusion alike.
+pub fn child_text(helper: &str) -> String {
+    format!(
+        "local function {helper}_child(props: any): Instance \
+if props.Make ~= nil then local make: any = props.Make local rest: any = {{}} \
+for k, v in props do if k ~= \"Class\" and k ~= \"Make\" then rest[k] = v end end return make(props.Class)(rest) end \
+local c: any = Instance.new(props.Class) \
+local function adopt(x: any) if typeof(x) == \"Instance\" then x.Parent = c elseif type(x) == \"table\" then for _, y in x do adopt(y) end end end \
+for k, v in props do if k == \"Class\" then continue end \
+if type(k) ~= \"string\" then adopt(v) elseif typeof(c[k]) == \"RBXScriptSignal\" then c[k]:Connect(v) else c[k] = v end end return c end "
+    )
+}
+
+/// The handler helper as one line of Alloy, for the table form. It takes
+/// any function for an event and keeps a nil handler nil: Vide types
+/// `Activated` as `(InputObject, number) -> ()`, and a `() -> ()` fails.
+pub fn on_text(helper: &str) -> String {
+    format!(
+        "local function {helper}_on(f: any): any if f == nil then return nil end \
+local h: any = f return function(...) h(...) end end "
+    )
+}
+
+/// The viewport helper as one line of Alloy. It scales the body by the
+/// size of the ScreenGui that holds it over the design size, clamped to
+/// the bounds, with a UIScale, and sizes the body to the screen over that
+/// scale, so inside it every size reads in design pixels. The size of
+/// the ScreenGui leaves out the top bar when the document keeps the
+/// insets. Before the ScreenGui has a size, the camera's `ViewportSize`
+/// stands in. With `make`, it builds the body and fits it, as the table
+/// form takes it. Without, it returns the function that fits one, which
+/// React calls as a `ref` with the instance, and with nil when the body
+/// goes.
+// ponytail: it reads the camera that is current when the body mounts. A
+// script that swaps `workspace.CurrentCamera` later leaves the stand-in
+// on the old one; watch `CurrentCamera` if a game does that.
+pub fn viewport_text(helper: &str) -> String {
+    format!(
+        "local function {helper}_viewport(w: number?, h: number?, lo: number?, hi: number?, base: number?, make: any): any \
+local cons: {{ any }} = {{}} \
+local function drop() for _, c in cons do c:Disconnect() end table.clear(cons) end \
+local function fit(value: any): any \
+drop() \
+if typeof(value) ~= \"Instance\" then return value end \
+local el: any = value \
+local scale: any = el:FindFirstChild(\"viewport\") \
+if scale == nil then scale = Instance.new(\"UIScale\") scale.Name = \"viewport\" scale.Parent = el end \
+local camera = game:GetService(\"Workspace\").CurrentCamera \
+local gui: any = nil \
+local function resize() local s = base or 1 \
+local size: any = if gui ~= nil and gui.AbsoluteSize.X > 0 and gui.AbsoluteSize.Y > 0 then gui.AbsoluteSize elseif camera ~= nil then camera.ViewportSize else nil \
+if size ~= nil and (w ~= nil or h ~= nil) then s = math.min(if w ~= nil then size.X / w else math.huge, if h ~= nil then size.Y / h else math.huge) end \
+s = math.clamp(s, lo or 0, hi or math.huge) if s <= 0 or s == math.huge then s = 1 end \
+scale.Scale = s el.Size = UDim2.fromScale(1 / s, 1 / s) end \
+local watch: any = nil \
+local function follow() if watch ~= nil then watch:Disconnect() end \
+gui = el:FindFirstAncestorWhichIsA(\"LayerCollector\") \
+watch = if gui ~= nil then gui:GetPropertyChangedSignal(\"AbsoluteSize\"):Connect(resize) else nil \
+resize() end \
+follow() \
+table.insert(cons, {{ Disconnect = function() if watch ~= nil then watch:Disconnect() end end }}) \
+table.insert(cons, (el.AncestryChanged:Connect(follow))) \
+if camera ~= nil then table.insert(cons, camera:GetPropertyChangedSignal(\"ViewportSize\"):Connect(resize)) end \
+table.insert(cons, (el.Destroying:Connect(drop))) \
+return el end \
+if make ~= nil then local build: any = make return fit(build()) end \
+return fit end "
+    )
+}
+
+/// The markup factory of a project: what `[alx.factory]` sets.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Factory {
+    /// `backend = "table"`: a tag lowers to `create(name)(props)`, as
+    /// Vide, Fluid, and Fusion take it. Else the element form, React's.
+    pub table: bool,
+    /// The function a tag calls: `vide.create`, `New`.
+    pub create: Option<String>,
+    /// `compute`, which wraps a value that reads Fusion state, and `use`,
+    /// the reader inside it.
+    pub compute: Option<(String, String)>,
+}
+
+impl Factory {
+    /// The factory in the `[alx]` table the host sends at init. It comes
+    /// from `alloy.toml` or `.config.aly` alike. An old host sends none,
+    /// and Silk takes the element form, as Alloy does with no `[alx]`.
+    pub fn from_alx(alx: &serde_json::Value) -> Self {
+        let text = |key: &str| {
+            alx["factory"]
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
+
+        Self {
+            table: text("backend").as_deref() == Some("table"),
+            create: text("create"),
+            compute: text("compute").map(|c| (c, text("use").unwrap_or_else(|| "use".into()))),
+        }
+    }
 }
 
 /// Applies edits the way the host does, for tests.
@@ -2664,28 +4391,40 @@ mod tests {
 
     #[test]
     fn a_class_tags_the_element_through_the_helper() {
-        let out = silk(
-            "return <div>\n  <button className=\"primary big\" onClick={go}>Go</button>\n</div>\n",
-        );
+        let src =
+            "return <div>\n  <button className=\"primary big\" onClick={go}>Go</button>\n</div>\n";
+        let out = vide(src);
 
         assert!(
             out.contains("{__silk(function() return <TextButton"),
             "{out}"
         );
-        assert!(out.contains("Activated={go}"), "{out}");
+        assert!(out.contains("Activated={__silk_on(go)}"), "{out}");
         assert!(
-            out.contains("</TextButton> end, \"primary big\", nil)}"),
+            out.contains("</TextButton> end, \"primary big\", nil, nil, nil)}"),
             "{out}"
         );
-        assert!(out.starts_with("local function __silk("), "{out}");
+        assert!(out.starts_with("local __silk_state"), "{out}");
+
+        // React's element is no instance: the helper takes it as a `ref`.
+        let out = silk(src);
+        assert!(
+            out.contains("{{ ref = __silk(nil, \"primary big\", nil, nil, nil, nil) }}"),
+            "{out}"
+        );
+        assert!(out.contains("Activated={go}"), "{out}");
     }
 
     #[test]
     fn a_link_scrolls_to_its_target() {
-        let out = silk("return <nav><a href=\"#faq\">FAQ</a></nav>\n");
+        let out = vide("return <nav><a href=\"#faq\">FAQ</a></nav>\n");
 
         assert!(out.contains("<TextButton"), "{out}");
-        assert!(out.contains(" end, nil, \"faq\")}"), "{out}");
+        assert!(out.contains(" end, nil, \"faq\", nil, nil)}"), "{out}");
+        assert!(
+            silk("return <nav><a href=\"#faq\">FAQ</a></nav>\n")
+                .contains("{{ ref = __silk(nil, nil, \"faq\", nil, nil, nil) }}")
+        );
         assert!(out.contains("\\<u>FAQ\\</u>"), "{out}");
     }
 
@@ -2813,28 +4552,78 @@ mod tests {
         assert!(!out.contains("/> <"), "{out}");
     }
 
-    /// S2: a component takes only the props it declares.
+    /// S2, game UI 14: a component takes only the props it declares; the
+    /// order helper sets the order on what it returns.
     #[test]
-    fn a_component_in_a_box_takes_no_layout_order() {
+    fn a_component_in_a_box_takes_its_order_through_the_helper() {
         let out = silk("return <div><h1>T</h1><Card title=\"one\" /></div>\n");
-        assert!(out.contains("<Card title=\"one\" />"), "{out}");
+        assert!(
+            out.contains("{__silk_order((function() return <Card title=\"one\" /> end)(), 2)}"),
+            "{out}"
+        );
+        assert!(
+            out.contains("local function __silk_order(v: any, k: number, compute: any?): any"),
+            "{out}"
+        );
+    }
+
+    /// Game UI 13: a `{ }` child keeps the order of every child, and the
+    /// items it holds keep theirs.
+    #[test]
+    fn a_hole_child_keeps_the_order() {
+        let out = silk(
+            "return <div>\n  <h2>Create World</h2>\n  <p>NAME</p>\n  {seed_box}\n  <p>SEED</p>\n</div>\n",
+        );
+        assert!(out.contains("LayoutOrder={1000}"), "{out}");
+        assert!(out.contains("LayoutOrder={2000}"), "{out}");
+        assert!(out.contains("{__silk_order(seed_box, 3000)}"), "{out}");
+        assert!(out.contains("LayoutOrder={4000}"), "{out}");
+
+        // A hole that starts with markup: the helper wraps the tag wrapper.
+        let out = vide("return <div><p>a</p>{<p className=\"x\">b</p>}</div>\n");
+        assert!(
+            out.contains("{__silk_order(__silk(function() return <TextLabel"),
+            "{out}"
+        );
+        assert!(out.contains("end, \"x\", nil, nil, nil), 2000)}"), "{out}");
+
+        // A clickable box keeps its hole a child, in a fragment.
+        let out = silk("return <div onClick={go}><p>a</p>{extra}</div>\n");
+        assert!(out.contains("<>{__silk_order(extra, 2000)}</>"), "{out}");
     }
 
     /// S3, S4, S27, S28: the reports the manifest declares.
     #[test]
     fn at_rules_unknown_attributes_and_void_tags_report() {
-        assert!(lints("return <div><style>@media (x) { .a { color: red } }</style></div>\n").contains(&"unsupported_css".to_string()));
+        assert!(
+            lints("return <div><style>@media (x) { .a { color: red } }</style></div>\n")
+                .contains(&"unsupported_css".to_string())
+        );
 
         let src = "return <div><label htmlFor=\"n\">N</label><p onPointerDown={f}>x</p></div>\n";
         let out = silk(src);
-        assert!(!out.contains("htmlFor") && !out.contains("onPointerDown"), "{out}");
+        assert!(
+            !out.contains("htmlFor") && !out.contains("onPointerDown"),
+            "{out}"
+        );
         assert!(lints(src).contains(&"unknown_attribute".to_string()));
 
         assert!(lints("return <p>a<br>b</p>\n").contains(&"void_tag".to_string()));
 
-        let opts = Options { roblox: false, ..Options::default() };
-        let f = run("return <div><style>.x > UIListLayout { gap: 4px }</style></div>\n", "a.alx", &opts);
-        assert!(f.findings.iter().any(|f| f.lint == "roblox_instance"), "{:?}", f.findings);
+        let opts = Options {
+            roblox: false,
+            ..Options::default()
+        };
+        let f = run(
+            "return <div><style>.x > UIListLayout { gap: 4px }</style></div>\n",
+            "a.alx",
+            &opts,
+        );
+        assert!(
+            f.findings.iter().any(|f| f.lint == "roblox_instance"),
+            "{:?}",
+            f.findings
+        );
     }
 
     /// S5: the prelude goes after a leading block comment.
@@ -2842,16 +4631,31 @@ mod tests {
     fn the_prelude_follows_a_block_comment() {
         let src = "--[[\n    The shop.\n]]\nreturn <div className=\"x\"><p>a</p></div>\n";
         let out = silk(src);
-        assert!(out.starts_with("--[[\n    The shop.\n]]\nlocal function __silk("), "{out}");
+        assert!(
+            out.starts_with("--[[\n    The shop.\n]]\nlocal __silk_state"),
+            "{out}"
+        );
     }
 
     /// S7: text CSS on a box reaches the text inside it.
     #[test]
     fn text_css_on_a_box_is_inherited() {
-        let out = silk("return <div style={{ textAlign = \"center\", color = \"red\" }}><p>a</p></div>\n");
-        assert!(out.starts_with("return <Frame") && !out[..out.find("<TextLabel").unwrap()].contains("TextXAlignment"), "{out}");
-        assert!(out.contains("TextXAlignment={Enum.TextXAlignment.Center}"), "{out}");
-        assert!(out.contains("TextColor3={Color3.fromRGB(255, 0, 0)}"), "{out}");
+        let out = silk(
+            "return <div style={{ textAlign = \"center\", color = \"red\" }}><p>a</p></div>\n",
+        );
+        assert!(
+            out.starts_with("return <Frame")
+                && !out[..out.find("<TextLabel").unwrap()].contains("TextXAlignment"),
+            "{out}"
+        );
+        assert!(
+            out.contains("TextXAlignment={Enum.TextXAlignment.Center}"),
+            "{out}"
+        );
+        assert!(
+            out.contains("TextColor3={Color3.fromRGB(255, 0, 0)}"),
+            "{out}"
+        );
     }
 
     /// S8: the React form of a style reads the string.
@@ -2880,17 +4684,26 @@ mod tests {
     fn a_row_sizes_its_children_to_their_content() {
         let out = silk("return <div style={{ display = \"flex\" }}><p>a</p><p>b</p></div>\n");
         assert!(!out.contains("<TextLabel Name={\"p\"} BorderSizePixel={0} BackgroundTransparency={1} TextColor3={Color3.fromRGB(0, 0, 0)} TextSize={16} TextWrapped={true} TextXAlignment={Enum.TextXAlignment.Left} TextYAlignment={Enum.TextYAlignment.Top} Size={UDim2.fromScale(1, 0)}"), "{out}");
-        assert!(out.contains("AutomaticSize={Enum.AutomaticSize.XY}"), "{out}");
+        assert!(
+            out.contains("AutomaticSize={Enum.AutomaticSize.XY}"),
+            "{out}"
+        );
 
         let out = silk("return <button><img src=\"x\" /> Buy</button>\n");
-        assert!(out.contains("FillDirection={Enum.FillDirection.Horizontal}"), "{out}");
+        assert!(
+            out.contains("FillDirection={Enum.FillDirection.Horizontal}"),
+            "{out}"
+        );
         assert!(out.contains("> Buy</TextLabel>"), "{out}");
     }
 
     /// S16, S17, S23, S33: Enamel's classes and a written background.
     #[test]
     fn enamel_and_written_properties_keep_the_right_defaults() {
-        let opts = Options { enamel: true, ..Options::default() };
+        let opts = Options {
+            enamel: true,
+            ..Options::default()
+        };
         let text = |src: &str| apply(src, &run(src, "a.alx", &opts).edits);
 
         let out = text("return <div className=\"hover:bg-red-500\"><p>a</p></div>\n");
@@ -2912,9 +4725,17 @@ mod tests {
     /// S13, S14, S26, S29: values and orders.
     #[test]
     fn roblox_values_media_and_table_order() {
-        let out = silk("return <div><style>.b { BackgroundColor3: rgba(0, 0, 0, 0.5); TextSize: 14px; CornerRadius: 4px }</style></div>\n");
-        assert!(out.contains("BackgroundColor3 = Color3.fromRGB(0, 0, 0)"), "{out}");
-        assert!(out.contains("TextSize = 14,") || out.contains("TextSize = 14 "), "{out}");
+        let out = silk(
+            "return <div><style>.b { BackgroundColor3: rgba(0, 0, 0, 0.5); TextSize: 14px; CornerRadius: 4px }</style></div>\n",
+        );
+        assert!(
+            out.contains("BackgroundColor3 = Color3.fromRGB(0, 0, 0)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("TextSize = 14,") || out.contains("TextSize = 14 "),
+            "{out}"
+        );
         assert!(out.contains("CornerRadius = UDim.new(0, 4)"), "{out}");
 
         let out = silk("return <p style={{ TextSize = 20 }}>a</p>\n");
@@ -2923,8 +4744,1184 @@ mod tests {
         let out = silk("return <video muted />\n");
         assert!(out.contains("Volume={0}"), "{out}");
 
-        let out = silk("return <table><tbody><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></tbody></table>\n");
-        assert!(out.contains("<Frame Name={\"tr\"}") && out.contains("LayoutOrder={2}"), "{out}");
+        let out = silk(
+            "return <table><tbody><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></tbody></table>\n",
+        );
+        assert!(
+            out.contains("<Frame Name={\"tr\"}") && out.contains("LayoutOrder={2}"),
+            "{out}"
+        );
+    }
+
+    fn with_enamel(src: &str) -> String {
+        let opts = Options {
+            enamel: true,
+            ..Options::default()
+        };
+
+        apply(src, &run(src, "a.alx", &opts).edits)
+    }
+
+    /// The table form, as Vide lowers it.
+    fn vide_opts() -> Options {
+        Options {
+            factory: Factory {
+                table: true,
+                create: Some("vide.create".into()),
+                compute: None,
+            },
+            ..Options::default()
+        }
+    }
+
+    fn vide(src: &str) -> String {
+        let text = apply(src, &run(src, "a.alx", &vide_opts()).edits);
+        assert_eq!(
+            text.matches('\n').count(),
+            src.matches('\n').count(),
+            "{text}"
+        );
+
+        text
+    }
+
+    /// Game UI 9 and 16: a class drops only the defaults it sets. A text
+    /// color keeps the size and the alignment, and a gradient keeps the
+    /// clear background.
+    #[test]
+    fn a_class_drops_only_the_default_it_sets() {
+        let out = with_enamel("return <h1 className=\"text-white\">T</h1>\n");
+        assert!(out.contains("TextSize={32}"), "{out}");
+        assert!(out.contains("TextWrapped={true}"), "{out}");
+        assert!(
+            out.contains("TextXAlignment={Enum.TextXAlignment.Left}"),
+            "{out}"
+        );
+        assert!(!out.contains("TextColor3"), "{out}");
+
+        let out = with_enamel(
+            "return <h1 className=\"bg-gradient-to-b from-accent to-orange-500\">T</h1>\n",
+        );
+        assert!(out.contains("BackgroundTransparency={1}"), "{out}");
+
+        let out = with_enamel("return <button className=\"bg-red-500 stroke\">Go</button>\n");
+        assert!(
+            !out.contains("BackgroundColor3") && !out.contains("BackgroundTransparency"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("<UIStroke") && out.contains("<UICorner"),
+            "{out}"
+        );
+    }
+
+    /// Game UI 10: a size class replaces Silk's size on its axis, and
+    /// Silk names its own size on the other axis for Enamel.
+    #[test]
+    fn a_size_class_replaces_the_size_on_its_axis() {
+        let out = with_enamel("return <div className=\"w-full h-full\" />\n");
+        assert!(out.contains("Size={UDim2.fromScale(1, 0)}"), "{out}");
+        assert!(!out.contains("AutomaticSize"), "{out}");
+        assert!(out.contains("ClassName=\"w-full h-full\""), "{out}");
+
+        let out = with_enamel("return <div className=\"w-full\" />\n");
+        assert!(!out.contains("AutomaticSize"), "{out}");
+        assert!(out.contains("ClassName=\"w-full h-auto\""), "{out}");
+
+        let out = with_enamel("return <div className=\"h-full\" />\n");
+        assert!(out.contains("ClassName=\"h-full\""), "{out}");
+
+        let out = with_enamel("return <button className=\"w-auto\">Go</button>\n");
+        assert!(out.contains("Size={UDim2.new()}"), "{out}");
+        assert!(out.contains("ClassName=\"w-auto h-auto\""), "{out}");
+
+        // A scale and an offset stay in Silk's Size for Enamel to merge.
+        let out = with_enamel(
+            "return <div className=\"h-10\" style={{ width = \"calc(100% - 8px)\" }} />\n",
+        );
+        assert!(out.contains("Size={UDim2.new(1, -8, 0, 0)}"), "{out}");
+        assert!(out.contains("ClassName=\"h-10\""), "{out}");
+    }
+
+    /// Game UI 21: a theme class leaves out what its utilities set.
+    #[test]
+    fn a_theme_class_leaves_out_what_its_utilities_set() {
+        let opts = Options {
+            enamel: true,
+            theme: crate::enamel::theme(
+                "export const classes = { panel = 'bg-glass/75 rounded-2xl stroke stroke-white/15' }",
+            ),
+            ..Options::default()
+        };
+        let text = |src: &str| apply(src, &run(src, "a.alx", &opts).edits);
+
+        let out = text("return <button className=\"panel\">Go</button>\n");
+        assert!(!out.contains("Background"), "{out}");
+        assert!(
+            !out.contains("<UICorner") && !out.contains("<UIStroke"),
+            "{out}"
+        );
+        assert!(out.contains("<UIPadding"), "{out}");
+
+        let out = text("return <div className=\"panel\" />\n");
+        assert!(!out.contains("BackgroundTransparency"), "{out}");
+    }
+
+    /// Game UI 11: a child of a flex box is a flex item, and a classed
+    /// inline tag with no text beside it keeps its instance.
+    #[test]
+    fn a_flex_item_and_a_classed_span_keep_their_instances() {
+        let out = with_enamel(
+            "return <div className=\"flex justify-between\">\n  <span className=\"text-white\">L</span>\n  <span className=\"text-white\">R</span>\n</div>\n",
+        );
+        assert!(out.contains("<Frame Name={\"div\"}"), "{out}");
+        assert_eq!(
+            out.matches("<TextLabel Name={\"span\"}").count(),
+            2,
+            "{out}"
+        );
+        assert!(out.contains("LayoutOrder={2}"), "{out}");
+
+        let out =
+            silk("return <div style={{ display = \"flex\" }}><span>a</span><span>b</span></div>\n");
+        assert_eq!(
+            out.matches("<TextLabel Name={\"span\"}").count(),
+            2,
+            "{out}"
+        );
+
+        let src = "return <button className=\"group\"><span className=\"group-hover:text-yellow-400\">Inner</span></button>\n";
+        let out = apply(
+            src,
+            &run(
+                src,
+                "a.alx",
+                &Options {
+                    enamel: true,
+                    ..vide_opts()
+                },
+            )
+            .edits,
+        );
+        assert!(out.contains("<TextLabel Name={\"span\"}"), "{out}");
+        // A hole in a TextButton is text to the markup compiler; a
+        // fragment keeps the wrapper a child.
+        assert!(
+            out.contains("<>{__silk(function() return <TextLabel"),
+            "{out}"
+        );
+        assert!(out.contains("nil)}</></TextButton>"), "{out}");
+
+        // Text beside it: the class has no instance, and the lint says so.
+        let out = silk("return <p>Hi <b className=\"x\">there</b></p>\n");
+        assert!(out.contains("\\<b>there\\</b>"), "{out}");
+        assert!(
+            lints("return <p>Hi <b className=\"x\">there</b></p>\n")
+                .contains(&"no_effect".to_string())
+        );
+    }
+
+    /// Game UI 20: a hole beside a `Text` the author wrote is a child, in
+    /// a fragment so the markup compiler does not read it as text.
+    #[test]
+    fn a_hole_beside_text_is_a_child() {
+        let out = silk("return <button Text={label}>{grow}</button>\n");
+        assert!(out.contains("Text={label}"), "{out}");
+        assert!(out.contains("<>{grow}</>"), "{out}");
+
+        // A lone hole in a button whose classes replace every modifier
+        // still moves to Text: Enamel adds the modifiers back as children.
+        let out =
+            with_enamel("return <button className=\"p-2 rounded-xl border-0\">{x}</button>\n");
+        assert!(out.contains("Text={x}"), "{out}");
+    }
+
+    /// Game UI 19: `onChange` runs on each key with the text, as React
+    /// runs it, and `maxLength` cuts the text.
+    #[test]
+    fn on_change_runs_on_each_key() {
+        assert!(
+            silk("return <input maxLength={24} onChange={f} />\n")
+                .contains("{{ ref = __silk(nil, nil, nil, f, 24, nil) }}")
+        );
+        let out = vide("return <input maxLength={24} onChange={f} />\n");
+        assert!(
+            out.contains("return __silk(function() return <TextBox"),
+            "{out}"
+        );
+        assert!(out.contains(" end, nil, nil, f, 24)"), "{out}");
+        assert!(
+            !out.contains("FocusLost") && !out.contains("maxLength"),
+            "{out}"
+        );
+        assert!(out.contains("GetPropertyChangedSignal(\"Text\")"), "{out}");
+
+        let out = vide("return <textarea onInput={name} className=\"x\"></textarea>\n");
+        assert!(out.contains(" end, \"x\", nil, name, nil)"), "{out}");
+
+        // A handler on more lines stays where it stands, inside the `ref`.
+        let out = silk("return <input\n  onChange={function(t)\n    f(t)\n  end}\n/>\n");
+        assert!(
+            out.contains(
+                "{{ ref = __silk(nil, nil, nil, function(t)\n    f(t)\n  end, nil, nil) }}"
+            ),
+            "{out}"
+        );
+
+        assert!(lints("return <div onChange={f}></div>\n").contains(&"no_effect".to_string()));
+        assert!(!lints("return <input maxLength=\"4\" />\n").contains(&"no_effect".to_string()));
+    }
+
+    /// Game UI 26: in the table form, a child Silk adds and a VideoFrame
+    /// come from the child component, and a handler goes through the
+    /// handler helper, so Vide's typed factory takes the output.
+    #[test]
+    fn the_table_form_writes_what_a_typed_factory_takes() {
+        let opts = Options {
+            factory: Factory {
+                table: true,
+                ..Factory::default()
+            },
+            ..Options::default()
+        };
+        let src = "return <div>\n<style>.a { color: red }</style>\n<button onClick={go}>Go</button>\n<video src=\"x\" onMouseEnter={go} />\n</div>\n";
+        let out = apply(src, &run(src, "a.alx", &opts).edits);
+
+        assert!(
+            out.contains("<__silk_child Class=\"StyleLink\" StyleSheet="),
+            "{out}"
+        );
+        assert!(
+            out.contains("<__silk_child Class=\"UIPadding\" PaddingTop="),
+            "{out}"
+        );
+        assert!(
+            out.contains("<__silk_child Class=\"UIListLayout\" SortOrder="),
+            "{out}"
+        );
+        assert!(out.contains("Activated={__silk_on(go)}"), "{out}");
+        assert!(
+            out.contains("<__silk_child Class=\"VideoFrame\" Name={\"video\"}"),
+            "{out}"
+        );
+        assert!(out.contains("MouseEnter={__silk_on(go)}"), "{out}");
+        assert!(
+            out.contains("local function __silk_child(props: any): Instance"),
+            "{out}"
+        );
+
+        // The element form keeps the Roblox tags, which React needs.
+        let out = silk(src);
+        assert!(
+            out.contains("<UIPadding ") && out.contains("Activated={go}"),
+            "{out}"
+        );
+    }
+
+    /// The factory comes from the `[alx]` table the host sends at init.
+    #[test]
+    fn the_factory_comes_from_the_host() {
+        let vide = serde_json::json!({ "factory": { "backend": "table", "create": "vide.create", "compute": null } });
+        assert_eq!(
+            Factory::from_alx(&vide),
+            Factory {
+                table: true,
+                create: Some("vide.create".into()),
+                compute: None
+            }
+        );
+
+        let fusion = serde_json::json!({ "factory": { "backend": "table", "create": "New", "compute": "computed" } });
+        assert_eq!(
+            Factory::from_alx(&fusion).compute,
+            Some(("computed".into(), "use".into()))
+        );
+
+        let react = serde_json::json!({ "factory": { "backend": "element", "create": "React.createElement" } });
+        assert!(!Factory::from_alx(&react).table);
+
+        // An old host sends no `[alx]`: the element form, React's.
+        assert_eq!(
+            Factory::from_alx(&serde_json::Value::Null),
+            Factory::default()
+        );
+    }
+
+    /// Game UI 12: a classed child on the line of its box compiles as it
+    /// does on a line of its own.
+    #[test]
+    fn a_classed_child_on_the_line_of_its_box_keeps_the_layout_outside() {
+        let out = vide("return <div><p className=\"a\">x</p></div>\n");
+
+        assert!(
+            out.contains("<__silk_child Class=\"UIListLayout\" SortOrder={Enum.SortOrder.LayoutOrder} />{__silk(function() return <TextLabel"),
+            "{out}"
+        );
+    }
+
+    /// Game UI 15: a Roblox modifier inside a Silk tag takes no order
+    /// and is no box beside the text.
+    #[test]
+    fn a_roblox_modifier_is_no_box() {
+        let out = silk("return <button>\n  Play\n  <UIScale Scale={1.2} />\n</button>\n");
+
+        assert!(out.contains("<UIScale Scale={1.2} />"), "{out}");
+        assert!(
+            !out.contains("<TextLabel"),
+            "the text stays the button's: {out}"
+        );
+        assert!(!out.contains("UIListLayout"), "{out}");
+
+        let out = silk("return <div><p>a</p><UIGradient /><Frame /></div>\n");
+        assert!(out.contains("<UIGradient />"), "{out}");
+        assert!(out.contains("<Frame LayoutOrder={2} />"), "{out}");
+    }
+
+    /// Game UI 17: `disabled`, `hidden`, and `readOnly` negate a source
+    /// as a function that reads it.
+    #[test]
+    fn a_negated_attribute_reads_a_source() {
+        let out = silk(
+            "return <div><button disabled={busy}>Go</button><p hidden={busy}>x</p><input readOnly={busy} /><p hidden>y</p></div>\n",
+        );
+
+        assert!(out.contains("Interactable={__silk_not(busy)}"), "{out}");
+        assert!(out.contains("AutoButtonColor={__silk_not(busy)}"), "{out}");
+        assert!(out.contains("Visible={__silk_not(busy)}"), "{out}");
+        assert!(out.contains("TextEditable={__silk_not(busy)}"), "{out}");
+        assert!(out.contains("Visible={false}"), "{out}");
+        assert!(
+            out.contains(
+                "local function __silk_not(v: any, compute: any?): any if type(v) == \"function\""
+            ),
+            "{out}"
+        );
+    }
+
+    /// A negated source and an escaped hole stay live in every
+    /// factory: the helpers map a React binding, and derive a Fusion
+    /// state through the `compute` of the factory.
+    #[test]
+    fn a_negated_source_takes_each_factory() {
+        let src = "return <div><button disabled={busy}>Go</button><p>Hi <b>{name}</b></p></div>\n";
+        let fusion = Options {
+            factory: Factory {
+                table: true,
+                create: Some("New".into()),
+                compute: Some(("computed".into(), "use".into())),
+            },
+            ..Options::default()
+        };
+        let out = apply(src, &run(src, "a.alx", &fusion).edits);
+
+        assert!(
+            out.contains("Interactable={__silk_not(busy, computed)}"),
+            "{out}"
+        );
+        let list = apply(
+            "return <div><p>a</p>{items}</div>\n",
+            &run("return <div><p>a</p>{items}</div>\n", "a.alx", &fusion).edits,
+        );
+        assert!(
+            list.contains("{__silk_order(items, 2000, computed)}"),
+            "{list}"
+        );
+        assert!(out.contains("{__silk_rich(name, computed)}"), "{out}");
+
+        let script = format!(
+            "{}{}\n{}",
+            not_text("__silk"),
+            rich_text("__silk"),
+            r#"
+local binding = { map = function(self, f) return f(true) end }
+assert(__silk_not(binding) == false)
+assert(__silk_rich({ map = function(self, f) return f("<b>") end }) == "&lt;b&gt;")
+local state = { type = "State" }
+local derived = __silk_not(state, function(f) return f(function(v) assert(v == state) return false end) end)
+assert(derived == true)
+assert(__silk_not(function() return false end)() == true)
+assert(__silk_not(false) == true)
+"#
+        );
+        let path = std::env::temp_dir().join(format!("silk-not-{}.luau", std::process::id()));
+        std::fs::write(&path, script).unwrap();
+        let run = std::process::Command::new("luau").arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        let Ok(out) = run else {
+            eprintln!("no luau on PATH: the helper run is skipped");
+
+            return;
+        };
+
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Game UI 18: markup inside an attribute lowers as it does in a
+    /// body hole.
+    #[test]
+    fn markup_inside_an_attribute_lowers() {
+        let out = silk("return <Panel title=\"Hi\" children={[<p>one</p>, <p>two</p>]} />\n");
+
+        assert_eq!(out.matches("<TextLabel Name={\"p\"}").count(), 2, "{out}");
+        assert!(out.contains(">one</TextLabel>, <TextLabel"), "{out}");
+
+        // An attribute Silk drops takes its markup with it.
+        let out = silk("return <div title={<p>x</p>}></div>\n");
+        assert!(!out.contains("title") && !out.contains("<p"), "{out}");
+    }
+
+    /// Game UI 28: a block comment holds no tag, as a line comment does.
+    #[test]
+    fn a_tag_in_a_block_comment_is_no_tag() {
+        let src = "--[[\n  Silk has no handler on `<input>` here.\n]]\nreturn <div><br>x</div>\n";
+        let voids = run(src, "a.alx", &Options::default())
+            .findings
+            .into_iter()
+            .filter(|f| f.lint == "void_tag")
+            .count();
+
+        assert_eq!(voids, 1, "only the `<br>` outside the comment");
+    }
+
+    const DOCUMENT: &str = "return <html lang=\"en\">\n  <head>\n    <meta charset=\"utf-8\" />\n    <title>Menu &amp; more</title>\n    <meta name=\"display-order\" content=\"10\" />\n    <meta name=\"ignore-inset\" />\n    <meta name=\"reset-on-spawn\" content=\"false\" />\n    <meta name=\"viewport\" content=\"width=1280, height=720, minimum-scale=0.5, maximum-scale=2\" />\n    <style>.card { color: red }</style>\n  </head>\n  <body>\n    <p>Hi</p>\n  </body>\n</html>\n";
+
+    /// `<html>` is a ScreenGui that the head configures: the title names
+    /// it, each meta sets a property, and the style links to it.
+    #[test]
+    fn a_document_makes_a_screen_gui() {
+        let out = silk(DOCUMENT);
+
+        assert!(
+            out.contains("<ScreenGui Name={\"Menu & more\"} ZIndexBehavior={Enum.ZIndexBehavior.Sibling} DisplayOrder={10} ScreenInsets={Enum.ScreenInsets.None} ResetOnSpawn={false}>"),
+            "{out}"
+        );
+        assert!(out.contains("</ScreenGui>"), "{out}");
+        assert!(
+            out.contains("<StyleLink StyleSheet={__silk_sheet("),
+            "{out}"
+        );
+        assert!(
+            !out.contains("<head") && !out.contains("<meta") && !out.contains("<title"),
+            "{out}"
+        );
+        assert!(!out.contains("lang") && !out.contains("charset"), "{out}");
+        // React's body takes the viewport as a `ref`.
+        assert!(
+            out.contains("<Frame Name={\"body\"}") && out.contains("Size={UDim2.fromScale(1, 1)}"),
+            "{out}"
+        );
+        assert!(
+            out.contains("AnchorPoint={Vector2.new(0.5, 0.5)} Position={UDim2.fromScale(0.5, 0.5)} {{ ref = __silk_viewport(1280, 720, 0.5, 2, nil) }}>"),
+            "{out}"
+        );
+        assert!(
+            out.contains("local function __silk_viewport(w: number?, h: number?, lo: number?"),
+            "{out}"
+        );
+
+        let findings: Vec<String> = run(DOCUMENT, "a.alx", &Options::default())
+            .findings
+            .into_iter()
+            .map(|f| f.lint)
+            .collect();
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    /// The document compiles under each factory: the table form builds
+    /// the body inside the viewport helper, and the element form hands it
+    /// the instance as a `ref`.
+    #[test]
+    fn a_document_takes_each_factory() {
+        let table = |create: &str, compute: Option<(&str, &str)>| Options {
+            factory: Factory {
+                table: true,
+                create: Some(create.into()),
+                compute: compute.map(|(c, u)| (c.into(), u.into())),
+            },
+            ..Options::default()
+        };
+        let vide = table("vide.create", None);
+        let fusion = table("New", Some(("computed", "use")));
+        let react = Options {
+            factory: Factory {
+                table: false,
+                create: Some("React.createElement".into()),
+                compute: None,
+            },
+            ..Options::default()
+        };
+
+        for opts in [&vide, &fusion] {
+            let out = apply(DOCUMENT, &run(DOCUMENT, "a.alx", opts).edits);
+
+            assert!(
+                out.contains("{__silk_viewport(1280, 720, 0.5, 2, nil, function() return <Frame Name={\"body\"}"),
+                "{out}"
+            );
+            assert!(out.contains("</Frame> end)}"), "{out}");
+            assert!(!out.contains("ref ="), "{out}");
+            assert!(
+                out.contains("<__silk_child Class=\"StyleLink\" StyleSheet="),
+                "{out}"
+            );
+            assert!(out.contains("<ScreenGui Name={\"Menu & more\"}"), "{out}");
+        }
+
+        let out = apply(DOCUMENT, &run(DOCUMENT, "a.alx", &react).edits);
+        assert!(
+            out.contains("{{ ref = __silk_viewport(1280, 720, 0.5, 2, nil) }}"),
+            "{out}"
+        );
+
+        assert!(out.contains("<StyleLink StyleSheet="), "{out}");
+
+        // A body with a class takes one `ref` that runs both helpers.
+        let classed = DOCUMENT.replace("<body>", "<body className=\"card\">");
+        let out = apply(&classed, &run(&classed, "a.alx", &react).edits);
+        assert!(
+            out.contains("{{ ref = __silk(nil, \"card\", nil, nil, nil, __silk_viewport(1280, 720, 0.5, 2, nil)) }}"),
+            "{out}"
+        );
+        let out = apply(&classed, &run(&classed, "a.alx", &vide).edits);
+        assert!(
+            out.contains("{__silk_viewport(1280, 720, 0.5, 2, nil, function() return __silk(function() return <Frame Name={\"body\"}"),
+            "{out}"
+        );
+
+        // A source reaches each property as it is.
+        let src = "return <html><head><title>{name}</title><meta name=\"display-order\" content={order} /><meta name=\"ignore-inset\" content={full} /><meta name=\"reset-on-spawn\" /></head><body>{children}</body></html>\n";
+
+        for opts in [&vide, &fusion, &react] {
+            let out = apply(src, &run(src, "a.alx", opts).edits);
+
+            assert!(
+                out.contains("<ScreenGui Name={name} ZIndexBehavior={Enum.ZIndexBehavior.Sibling} DisplayOrder={order} IgnoreGuiInset={full} ResetOnSpawn={true}>"),
+                "{out}"
+            );
+            assert!(!out.contains("viewport"), "{out}");
+        }
+    }
+
+    #[test]
+    fn the_viewport_reads_the_html_keys() {
+        let (v, problems) = Viewport::parse(
+            "width=1280px; height=720, min-scale=0.5, maximum-scale=2, user-scalable=no",
+        );
+        assert_eq!(
+            v,
+            Some(Viewport {
+                width: Some(1280.0),
+                height: Some(720.0),
+                min: Some(0.5),
+                max: Some(2.0),
+                initial: None,
+            })
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+
+        // HTML's usual line scales nothing.
+        assert_eq!(
+            Viewport::parse("width=device-width, initial-scale=1"),
+            (None, Vec::new())
+        );
+
+        let (_, problems) = Viewport::parse("width=wide, zoom=2");
+        assert_eq!(problems.len(), 2, "{problems:?}");
+    }
+
+    /// The viewport helper runs under `luau` against the mock camera of
+    /// `tests/viewport.luau`. A machine without `luau` skips the run.
+    #[test]
+    fn the_viewport_helper_runs_against_a_mock() {
+        let script = format!(
+            "{}\n{}",
+            viewport_text("__silk"),
+            include_str!("../tests/viewport.luau")
+        );
+        let path = std::env::temp_dir().join(format!("silk-viewport-{}.luau", std::process::id()));
+        std::fs::write(&path, script).unwrap();
+        let run = std::process::Command::new("luau").arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        let Ok(out) = run else {
+            eprintln!("no luau on PATH: the helper run is skipped");
+
+            return;
+        };
+
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// LANG_BUGS 70: `border-image` with a `url()` is a 9-slice. A box
+    /// becomes an ImageLabel and a button an ImageButton, with the slice
+    /// as its `SliceCenter`, and its text stands in TextLabels of its own.
+    /// A Luau `borderImageSource` stays live, in every factory.
+    #[test]
+    fn a_border_image_url_is_a_nine_slice() {
+        let src = "return <div>\n  <div style={{ borderImage = 'url(rbxassetid://123) 4 fill', borderImageSize = 32 }}>\n    <p>Hi</p>\n  </div>\n  <button style={{ borderImage = 'url(rbxassetid://7) 3 3 5 3 fill / 6px', borderImageSize = '48px', color = '#ffffff' }}>Buy</button>\n</div>\n";
+        let fusion = Options {
+            factory: Factory {
+                table: true,
+                create: Some("New".into()),
+                compute: Some(("computed".into(), "use".into())),
+            },
+            ..Options::default()
+        };
+
+        for out in [
+            vide(src),
+            silk(src),
+            apply(src, &run(src, "a.alx", &fusion).edits),
+        ] {
+            assert!(out.contains("<ImageLabel Name={\"div\"}"), "{out}");
+            assert!(out.contains("Image={\"rbxassetid://123\"} ScaleType={Enum.ScaleType.Slice} SliceCenter={Rect.new(4, 4, 28, 28)}"), "{out}");
+            assert!(out.contains("<ImageButton Name={\"button\"}"), "{out}");
+            assert!(
+                out.contains("SliceCenter={Rect.new(3, 3, 45, 43)} SliceScale={2}"),
+                "{out}"
+            );
+            assert!(
+                out.contains("TextColor3={Color3.fromRGB(255, 255, 255)} TextSize={13} FontFace="),
+                "{out}"
+            );
+            assert!(out.contains("LayoutOrder={1}>Buy</TextLabel>"), "{out}");
+            assert!(!out.contains("UIStroke"), "{out}");
+            assert!(!out.contains("UICorner"), "{out}");
+        }
+
+        // A live image id, with the Roblox slice on the tag.
+        let src = "return <button style={{ borderImageSource = face }} SliceCenter={center}><span className=\"x\">Go</span></button>\n";
+        assert!(lints(src).is_empty(), "{:?}", lints(src));
+
+        for out in [
+            vide(src),
+            silk(src),
+            apply(src, &run(src, "a.alx", &fusion).edits),
+        ] {
+            assert!(out.contains("<ImageButton"), "{out}");
+            assert!(out.contains("Image={face}"), "{out}");
+            assert!(out.contains("ScaleType={Enum.ScaleType.Slice}"), "{out}");
+            assert!(out.contains("SliceCenter={center}"), "{out}");
+        }
+
+        // A rule of one class makes the element an ImageLabel.
+        let out = silk(
+            "return <div>\n<style>.panel { border-image: url(rbxassetid://5) 2 fill; border-image-size: 48px; border-image-width: 3 }</style>\n<div className=\"panel\" />\n</div>\n",
+        );
+        assert!(out.contains("<ImageLabel Name={\"div\"}"), "{out}");
+        assert!(out.contains("{ \".panel\", 100000, { Image = \"rbxassetid://5\", ScaleType = Enum.ScaleType.Slice, SliceCenter = Rect.new(2, 2, 46, 46), SliceScale = 3 } }"), "{out}");
+
+        // With no size of the image, the slice has no place, and an input
+        // takes no 9-slice.
+        assert!(
+            lints("return <div style={{ borderImage = 'url(rbxassetid://9) 4 fill' }} />\n")
+                .contains(&"bad_value".to_string())
+        );
+        let src = "return <input style={{ borderImage = 'url(rbxassetid://9) 4 fill' }} />\n";
+        assert_eq!(lints(src), vec!["no_effect".to_string()]);
+        assert!(!silk(src).contains("Image="), "{}", silk(src));
+    }
+
+    /// LANG_BUGS 68: the markup compiler finds the end of a hole as it
+    /// reads Luau. Text in a hole that Silk writes, with a quote that has
+    /// no pair on its line, becomes Luau strings the compiler reads as
+    /// the same text, and the file keeps its lines.
+    #[test]
+    fn text_in_a_hole_of_silk_reads_as_the_same_text() {
+        // A text class with nothing else takes one string.
+        let src = "return <div>\n  <p className=\"text-sm\">\n    Uses \"Cave Tileset\" and \"Weapons\n    Pack\" by xvideosman.\n  </p>\n</div>\n";
+        let out = vide(src);
+        assert!(
+            out.contains(
+                "LayoutOrder={1}>{\"Uses \\\"Cave Tileset\\\" and \\\"Weapons Pack\\\" by xvideosman.\"\n\n\n}</TextLabel>"
+            ),
+            "{out}"
+        );
+
+        // Beside the children of a button, the text stays text.
+        let out = vide("return <div><button className=\"x\">Don't -- {\"}\"}</button></div>\n");
+        assert!(out.contains(">Don{\"'\"}t -{\"-\"} "), "{out}");
+
+        // RichText, an entity, and a pair on one line.
+        let out = vide(
+            "return <div><p className=\"x\">Hi <b>it's</b> &#123; \"ok\"</p><p className=\"y\">A \"b\" c</p></div>\n",
+        );
+        assert!(out.contains("{\"Hi <b>it's</b> { \\\"ok\\\"\"}"), "{out}");
+        assert!(out.contains(">A \"b\" c</TextLabel>"), "{out}");
+
+        // A comment, and the text of a component the order helper wraps.
+        let src = "return <div>\n  <h1>T</h1>\n  <Card>Don't</Card>\n  <!-- don't -->\n</div>\n";
+
+        for out in [vide(src), silk(src)] {
+            assert!(out.contains("<Card>{\"Don't\"}</Card>"), "{out}");
+        }
+
+        let out = vide("return <div><div className=\"x\"><!-- it's ]] --></div></div>\n");
+        assert!(out.contains("{--[=[ it's ]] ]=]}"), "{out}");
+
+        // React writes no hole around a classed element: the text stays.
+        let out = silk(
+            src.replace("<h1>T</h1>", "<p className=\"x\">it's</p>")
+                .as_str(),
+        );
+        assert!(out.contains(">it's</TextLabel>"), "{out}");
+    }
+
+    /// LANG_BUGS 67: a hole beside an element of its own in a button is
+    /// a child, and the button shows no text. Beside text, or beside an
+    /// inline tag that folds into the text, the hole stays text.
+    #[test]
+    fn a_hole_beside_an_element_of_a_button_is_a_child() {
+        let src = "return <button className=\"appearance-none\">\n  {child}\n  <span style={{ position = \"absolute\" }}>b</span>\n</button>\n";
+
+        for out in [vide(src), silk(src)] {
+            assert!(!out.contains("Text={child}"), "{out}");
+            assert!(out.contains("Text={\"\"}"), "{out}");
+            assert!(out.contains("<>{child}</>"), "{out}");
+        }
+
+        // A box beside the hole in a row: the hole takes its place.
+        let out = vide("return <button>{icon}<img src=\"rbxassetid://1\" /></button>\n");
+        assert!(out.contains("<>{__silk_order(icon, 1000)}</>"), "{out}");
+        assert!(out.contains("Text={\"\"}"), "{out}");
+
+        let out = silk("return <button>{count}<b>!</b></button>\n");
+        assert!(out.contains("{__silk_rich(count)}\\<b>!\\</b>"), "{out}");
+
+        let out = silk("return <button>{label}</button>\n");
+        assert!(out.contains("Text={label}"), "{out}");
+    }
+
+    /// LANG_BUGS 66: a Luau background color in `style` shows the box,
+    /// and a transparency on the tag keeps the value of the tag. The
+    /// table holds each key once.
+    #[test]
+    fn a_property_the_tag_sets_keeps_the_value_of_the_tag() {
+        let src = "return <button className=\"appearance-none\" style={{ backgroundColor = fill }} BackgroundTransparency={clear}>\n  Small\n</button>\n";
+
+        for out in [vide(src), silk(src)] {
+            assert_eq!(out.matches("BackgroundTransparency=").count(), 1, "{out}");
+            assert!(out.contains("BackgroundTransparency={clear}"), "{out}");
+            assert!(out.contains("BackgroundColor3={fill}"), "{out}");
+        }
+
+        // A key the tag writes itself takes the value of the tag.
+        let src = "return <div style={{ backgroundColor = fill, zIndex = z }} BackgroundColor3={other} />\n";
+        let out = silk(src);
+        assert_eq!(out.matches("BackgroundColor3=").count(), 1, "{out}");
+        assert!(out.contains("BackgroundColor3={other}"), "{out}");
+        assert!(out.contains("ZIndex={z}"), "{out}");
+        assert!(lints(src).contains(&"no_effect".to_string()));
+    }
+
+    /// LANG_BUGS 65: the items of `vide.values` come in the order of a
+    /// hash, and each binds `LayoutOrder` to its index. The order helper
+    /// adds the place of the hole to that order and follows it. Each
+    /// factory writes the one helper; `tests/order.luau` runs it under
+    /// `luau`, and a machine without `luau` skips the run.
+    #[test]
+    fn a_list_item_keeps_the_order_it_binds() {
+        let src = "return <div className=\"flex-col\">\n  {vide.values(lines, function(line, index)\n    return <p LayoutOrder={index}>{line}</p>\n  end)}\n</div>\n";
+        let fusion = Options {
+            factory: Factory {
+                table: true,
+                create: Some("New".into()),
+                compute: Some(("computed".into(), "use".into())),
+            },
+            ..Options::default()
+        };
+
+        for (out, tail) in [
+            (vide(src), "end), 1000)}"),
+            (
+                apply(src, &run(src, "a.alx", &fusion).edits),
+                "end), 1000, computed)}",
+            ),
+            (silk(src), "end), 1000)}"),
+        ] {
+            assert!(out.contains("{__silk_order(vide.values("), "{out}");
+            assert!(out.contains(tail), "{out}");
+            assert!(out.contains("local __silk_own"), "{out}");
+            assert!(out.contains("LayoutOrder={index}"), "{out}");
+        }
+
+        let script = format!(
+            "{}\n{}",
+            order_text("__silk"),
+            include_str!("../tests/order.luau")
+        );
+        let path = std::env::temp_dir().join(format!("silk-order-{}.luau", std::process::id()));
+        std::fs::write(&path, script).unwrap();
+        let run = std::process::Command::new("luau").arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        let Ok(out) = run else {
+            eprintln!("no luau on PATH: the helper run is skipped");
+
+            return;
+        };
+
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// The tag helper runs under `luau` against the mock of
+    /// `tests/helper.luau`, in both forms. A machine without `luau`
+    /// skips the run.
+    #[test]
+    fn the_tag_helper_runs_against_a_mock() {
+        let script = format!(
+            "{}\n{}",
+            helper_text("__silk"),
+            include_str!("../tests/helper.luau")
+        );
+        let path = std::env::temp_dir().join(format!("silk-helper-{}.luau", std::process::id()));
+        std::fs::write(&path, script).unwrap();
+        let run = std::process::Command::new("luau").arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        let Ok(out) = run else {
+            eprintln!("no luau on PATH: the helper run is skipped");
+
+            return;
+        };
+
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// The child component hands a child with `Make` to the factory,
+    /// without the `Class` and the `Make`.
+    #[test]
+    fn the_child_component_builds_through_make() {
+        let script = format!(
+            "{}\nlocal made: any = nil\nlocal function make(class) return function(props) made = {{ class = class, props = props }} return 7 end end\nassert(__silk_child({{ Class = \"UIScale\", Scale = 2, Make = make }}) == 7)\nassert(made.class == \"UIScale\" and made.props.Scale == 2 and made.props.Make == nil and made.props.Class == nil)\nlocal INST = {{}}\ntypeof = function(v) return if getmetatable(v) == INST then \"Instance\" else type(v) end\nInstance = {{ new = function(c) return setmetatable({{ ClassName = c }}, INST) end }}\nlocal g = Instance.new(\"UIGradient\")\nlocal stroke = __silk_child({{ Class = \"UIStroke\", Thickness = 6, g }})\nassert(stroke.Thickness == 6 and g.Parent == stroke)\n",
+            child_text("__silk")
+        );
+        let path = std::env::temp_dir().join(format!("silk-child-{}.luau", std::process::id()));
+        std::fs::write(&path, script).unwrap();
+        let run = std::process::Command::new("luau").arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        let Ok(out) = run else {
+            eprintln!("no luau on PATH: the helper run is skipped");
+
+            return;
+        };
+
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn a_head_tag_outside_a_document_reports() {
+        let out = run(
+            "return <div><meta name=\"viewport\" content=\"width=1\" /><title>x</title></div>\n",
+            "a.alx",
+            &Options::default(),
+        );
+        let unsupported = out
+            .findings
+            .iter()
+            .filter(|f| f.lint == "unsupported_tag")
+            .count();
+
+        assert_eq!(unsupported, 2, "{:?}", out.findings);
+
+        let lints = lints(
+            "return <html><head><meta name=\"theme-color\" content=\"#fff\" /><meta name=\"viewport\" content=\"width=10\" /></head></html>\n",
+        );
+        assert!(lints.contains(&"no_effect".to_string()), "{lints:?}");
+
+        // A value on more lines cannot move to the open tag.
+        let src = "return <html><head><meta name=\"display-order\" content={if a\n  then 1 else 2} /></head><body /></html>\n";
+        assert!(
+            silk(src).contains(
+                "<ScreenGui Name={\"html\"} ZIndexBehavior={Enum.ZIndexBehavior.Sibling}>"
+            )
+        );
+        assert!(
+            run(src, "a.alx", &Options::default())
+                .findings
+                .iter()
+                .any(|f| f.lint == "dynamic_style")
+        );
+    }
+
+    /// A child that places itself stands out of the flow, so its box
+    /// writes no layout: a UIListLayout would move it.
+    #[test]
+    fn a_placed_child_turns_the_layout_off() {
+        let out = silk(
+            "return <div><p>a</p><div style={{ position = \"absolute\", top = 0 }}>b</div></div>\n",
+        );
+        assert!(!out.contains("UIListLayout"), "{out}");
+
+        let out = silk("return <div><Frame Position={UDim2.new()} /><p>a</p></div>\n");
+        assert!(!out.contains("UIListLayout"), "{out}");
+
+        let out = with_enamel(
+            "return <div className=\"w-full\">{children}<div className=\"absolute inset-0\" /></div>\n",
+        );
+        assert!(!out.contains("UIListLayout"), "{out}");
+
+        // A button keeps its text beside a badge that places itself.
+        let out = with_enamel(
+            "return <button>Play<span className=\"absolute top-0 right-0\">new</span></button>\n",
+        );
+        assert!(!out.contains("UIListLayout"), "{out}");
+        assert!(!out.contains("Name={\"text\"}"), "{out}");
+        assert!(out.contains(">Play<"), "{out}");
+
+        // A layout the author asks for stays.
+        let out = silk(
+            "return <div style={{ display = \"flex\" }}><span style={{ position = \"absolute\" }}>x</span></div>\n",
+        );
+        assert!(out.contains("UIListLayout"), "{out}");
+
+        // `position: relative` with no offset flows.
+        let out = silk("return <div><p style={{ position = \"relative\" }}>a</p><p>b</p></div>\n");
+        assert!(out.contains("UIListLayout"), "{out}");
+    }
+
+    /// An Enamel overflow class makes a ScrollingFrame whose canvas
+    /// grows with its content, as `overflow: auto` in CSS does.
+    #[test]
+    fn an_overflow_class_scrolls() {
+        let out = with_enamel(
+            "return <div className=\"w-full h-[400px] overflow-y-auto flex flex-wrap gap-4\"><p>a</p></div>\n",
+        );
+
+        assert!(out.contains("<ScrollingFrame Name={\"div\"}"), "{out}");
+        assert!(
+            out.contains("ScrollingDirection={Enum.ScrollingDirection.Y} CanvasSize={UDim2.new()} AutomaticCanvasSize={Enum.AutomaticSize.Y}"),
+            "{out}"
+        );
+        assert!(out.contains("</ScrollingFrame>"), "{out}");
+
+        // Enamel's own direction class wins over Silk's.
+        let out =
+            with_enamel("return <div className=\"h-10 overflow-auto scroll-x\"><p>a</p></div>\n");
+        assert!(out.contains("<ScrollingFrame"), "{out}");
+        assert!(!out.contains("ScrollingDirection="), "{out}");
+    }
+
+    /// `appearance: none` drops the look a browser gives a control, so a
+    /// bare TextButton needs no Roblox tag.
+    #[test]
+    fn appearance_none_drops_the_browser_look() {
+        let out = silk("return <button style={{ appearance = \"none\" }}>Go</button>\n");
+
+        assert!(out.contains("BackgroundTransparency={1}"), "{out}");
+        assert!(!out.contains("BackgroundColor3"), "{out}");
+        assert!(
+            !out.contains("UIPadding") && !out.contains("UIStroke") && !out.contains("UICorner"),
+            "{out}"
+        );
+
+        let out =
+            with_enamel("return <button className=\"appearance-none size-9 rounded-lg\" />\n");
+        assert!(
+            !out.contains("UIStroke") && !out.contains("UIPadding"),
+            "{out}"
+        );
+
+        let out = silk(
+            "return <div><style>.x { appearance: none; }</style><input className=\"x\" /></div>\n",
+        );
+        assert!(!out.contains("UIStroke"), "{out}");
+
+        // A box keeps its look: `appearance` is for controls.
+        assert!(
+            silk("return <ul style={{ appearance = \"none\" }}><li>a</li></ul>\n")
+                .contains("UIPadding")
+        );
+    }
+
+    /// A Luau value in `style` reaches the one property behind it, so a
+    /// source stays live. The table form builds a live child through the
+    /// project's factory.
+    #[test]
+    fn a_luau_value_in_style_reaches_its_property() {
+        let src = "return <button style={{ scale = grow, borderColor = color, borderWidth = 2, zIndex = z, backgroundColor = bg, rotate = spin }}>Go</button>\n";
+        let out = run(src, "a.alx", &Options::default());
+        let text = apply(src, &out.edits);
+
+        assert!(text.contains("<UIScale Scale={grow} />"), "{text}");
+        assert!(
+            text.contains("<UIStroke Color={color} Thickness={2} ApplyStrokeMode={Enum.ApplyStrokeMode.Border} />"),
+            "{text}"
+        );
+        assert!(
+            text.contains("ZIndex={z}")
+                && text.contains("BackgroundColor3={bg}")
+                && text.contains("Rotation={spin}"),
+            "{text}"
+        );
+        assert!(out.findings.is_empty(), "{:?}", out.findings);
+
+        for create in ["vide.create", "New"] {
+            let opts = Options {
+                factory: Factory {
+                    table: true,
+                    create: Some(create.into()),
+                    compute: None,
+                },
+                ..Options::default()
+            };
+            let text = apply(src, &run(src, "a.alx", &opts).edits);
+
+            assert!(
+                text.contains(&format!(
+                    "<__silk_child Class=\"UIScale\" Scale={{grow}} Make={{{create}}} />"
+                )),
+                "{text}"
+            );
+            // A child with no live value keeps `Instance.new`.
+            assert!(
+                text.contains("<__silk_child Class=\"UIPadding\" PaddingTop={UDim.new(0, 1)} PaddingRight={UDim.new(0, 6)} PaddingBottom={UDim.new(0, 1)} PaddingLeft={UDim.new(0, 6)} />"),
+                "{text}"
+            );
+        }
+
+        // A value on more lines stays where it stands, so the file keeps
+        // its lines. A modifier cannot take it there.
+        let out = silk(
+            "return <button style={{ color = function()\n  return c()\nend, scale = function()\n  return 1\nend }}>Go</button>\n",
+        );
+        assert!(
+            out.contains("TextColor3={function()\n  return c()\nend}"),
+            "{out}"
+        );
+        assert!(!out.contains("UIScale"), "{out}");
+        assert!(
+            lints("return <p style={{ scale = function()\n  return 1\nend }}>a</p>\n")
+                .contains(&"dynamic_style".to_string())
+        );
+
+        // A property with no single Roblox property behind it stays a
+        // compile-time value.
+        assert!(
+            lints("return <div style={{ width = w }}></div>\n")
+                .contains(&"dynamic_style".to_string())
+        );
+    }
+
+    /// An `AutomaticSize` the author writes keeps Silk's automatic axis
+    /// out of the classes, so Enamel writes no second one.
+    #[test]
+    fn a_written_automatic_size_wins() {
+        let out = with_enamel(
+            "return <button className=\"h-10\" AutomaticSize={Enum.AutomaticSize.X}>Go</button>\n",
+        );
+
+        assert!(out.contains("ClassName=\"h-10\""), "{out}");
+    }
+
+    /// `border-image` puts a gradient along the border: a UIGradient
+    /// inside the UIStroke, whose white color lets the gradient show.
+    #[test]
+    fn a_border_image_is_a_gradient_in_the_stroke() {
+        let src = "return <div style={{ border = \"6px solid #FFD65C\", borderImage = \"linear-gradient(to right, #FFD65C, transparent) 1\" }} />\n";
+        let out = silk(src);
+
+        assert!(
+            out.contains("<UIStroke Thickness={6} Color={Color3.new(1, 1, 1)} Transparency={0} ApplyStrokeMode={Enum.ApplyStrokeMode.Border}><UIGradient Color={ColorSequence.new({ ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 214, 92)), ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 214, 92)) })} Rotation={0} Transparency={NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1) })} /></UIStroke>"),
+            "{out}"
+        );
+
+        let out = vide(src);
+        assert!(
+            out.contains("<__silk_child Class=\"UIStroke\" Thickness={6}"),
+            "{out}"
+        );
+        assert!(
+            out.contains("><__silk_child Class=\"UIGradient\" Color={ColorSequence.new("),
+            "{out}"
+        );
+        assert!(out.contains(" /></__silk_child>"), "{out}");
+    }
+
+    /// A live stroke transparency and a live gradient reach their
+    /// modifier, so a source stays live. The gradient's direction is
+    /// `gradientRotation` or an Enamel direction class, which then leaves
+    /// the list so Enamel writes no second UIGradient.
+    #[test]
+    fn a_live_stroke_transparency_and_gradient_reach_their_modifier() {
+        let out = silk(
+            "return <button style={{ borderColor = color, borderTransparency = fade, borderWidth = 2 }}>Go</button>\n",
+        );
+        assert!(
+            out.contains("<UIStroke Color={color} Thickness={2} ApplyStrokeMode={Enum.ApplyStrokeMode.Border} Transparency={fade} />"),
+            "{out}"
+        );
+
+        // A literal is 0 to 1, as the Roblox property takes it.
+        let out = silk(
+            "return <div style={{ border = \"1px solid #fff\", borderTransparency = 0.8 }} />\n",
+        );
+        assert!(out.contains("Transparency={0.8}"), "{out}");
+
+        let out = silk(
+            "return <div style={{ backgroundGradient = sky, gradientRotation = 90, gradientTransparency = fade }} />\n",
+        );
+        assert!(
+            out.contains("<UIGradient Rotation={90} Color={sky} Transparency={fade} />"),
+            "{out}"
+        );
+        assert!(
+            out.contains("BackgroundTransparency={0} BackgroundColor3={Color3.new(1, 1, 1)}"),
+            "{out}"
+        );
+
+        // An Enamel direction class gives the rotation, and leaves the list.
+        let src = "return <div className=\"w-full h-full bg-white bg-gradient-to-b\" style={{ backgroundGradient = sky }} />\n";
+        let out = with_enamel(src);
+        assert!(
+            out.contains("<UIGradient Color={sky} Rotation={90} />"),
+            "{out}"
+        );
+        assert!(
+            out.contains("ClassName=\"w-full h-full bg-white \""),
+            "{out}"
+        );
+        assert!(
+            !out.contains("BackgroundColor3={Color3.new(1, 1, 1)}"),
+            "{out}"
+        );
+
+        // The table form builds the live gradient through the factory.
+        let out = vide(
+            "return <button className=\"bg-white\" style={{ backgroundGradient = track }}>Go</button>\n",
+        );
+        assert!(
+            out.contains("<__silk_child Class=\"UIGradient\" Color={track} Make={vide.create} />"),
+            "{out}"
+        );
+
+        // A literal gradient is CSS: the Luau name reports.
+        assert!(
+            lints("return <div style={{ backgroundGradient = \"red\" }} />\n")
+                .contains(&"bad_value".to_string())
+        );
     }
 
     #[test]

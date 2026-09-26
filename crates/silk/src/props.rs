@@ -12,6 +12,9 @@ use crate::css::{self, Decl, Len, Problem, Rgba, num};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
     Container,
+    /// A box that draws a 9-slice: an ImageLabel whose text stands in
+    /// TextLabels of its own.
+    Panel,
     Text,
     Input,
     Image,
@@ -27,7 +30,7 @@ impl Target {
     }
 
     fn has_image(self) -> bool {
-        matches!(self, Self::Image | Self::Any)
+        matches!(self, Self::Image | Self::Panel | Self::Any)
     }
 }
 
@@ -123,6 +126,8 @@ pub struct Out {
     pub opacity: Option<f64>,
     /// `overflow: auto` or `scroll`: the element becomes a ScrollingFrame.
     pub scroll: Option<&'static str>,
+    /// `appearance: none`: a control drops the look a browser gives it.
+    pub plain: bool,
     /// RichText tags to wrap the text in: `text-decoration` and
     /// `text-transform`.
     pub rich: Vec<(&'static str, &'static str)>,
@@ -319,7 +324,11 @@ pub fn family(value: &str, fonts: &Fonts) -> String {
 /// The name RichText's `face` takes for a family file: the `Enum.Font`
 /// name where the file carries another.
 pub fn rich_face(url: &str) -> String {
-    let file = url.rsplit('/').next().unwrap_or(url).trim_end_matches(".json");
+    let file = url
+        .rsplit('/')
+        .next()
+        .unwrap_or(url)
+        .trim_end_matches(".json");
 
     match file {
         "SourceSansPro" => "SourceSans",
@@ -363,6 +372,11 @@ const K: fn(&'static str, &'static str, &'static [&'static str]) -> Known =
 pub fn catalog() -> Vec<Known> {
     vec![
         K(
+            "appearance",
+            "`none` drops the look a browser gives a control: its background, border, corner, and padding",
+            &["none", "auto"],
+        ),
+        K(
             "align-items",
             "the cross-axis alignment of the `UIListLayout`",
             &[
@@ -401,6 +415,51 @@ pub fn catalog() -> Vec<Known> {
             &["none"],
         ),
         K("border-color", "`UIStroke.Color`", &[]),
+        K(
+            "border-transparency",
+            "`UIStroke.Transparency`, 0 to 1; takes a source",
+            &[],
+        ),
+        K(
+            "background-gradient",
+            "a `UIGradient`'s `Color`: a Luau ColorSequence, or a source of one",
+            &[],
+        ),
+        K(
+            "gradient-rotation",
+            "the `UIGradient`'s `Rotation`, in degrees",
+            &[],
+        ),
+        K(
+            "gradient-transparency",
+            "the `UIGradient`'s `Transparency`: a Luau NumberSequence, or a source of one",
+            &[],
+        ),
+        K(
+            "border-image",
+            "a 9-slice for `url() 4 fill`: the box becomes an `ImageLabel` with `ScaleType.Slice`; a `UIGradient` inside the `UIStroke` for `linear-gradient()`",
+            &["none"],
+        ),
+        K(
+            "border-image-source",
+            "the `Image` of a 9-slice: a `url()`, or a Luau image id or a source of one",
+            &[],
+        ),
+        K(
+            "border-image-slice",
+            "`SliceCenter`: 1 to 4 numbers in from the edges, in pixels of the image, and `fill`",
+            &["fill"],
+        ),
+        K(
+            "border-image-width",
+            "`SliceScale`: a number, or the width the top edge draws at",
+            &[],
+        ),
+        K(
+            "border-image-size",
+            "the size of the image in pixels, which `SliceCenter` needs",
+            &[],
+        ),
         K("border-radius", "a `UICorner`: `CornerRadius`", &[]),
         K(
             "border-style",
@@ -597,11 +656,28 @@ pub fn catalog() -> Vec<Known> {
     ]
 }
 
+/// The modifier key of a UIGradient that sits inside the UIStroke, for
+/// `border-image`: the emitter writes it as a child of the stroke.
+pub const STROKE_GRADIENT: &str = "UIStroke.UIGradient";
+
 /// The text properties CSS inherits from a box to the text inside it.
 pub const INHERITED: &[&str] = &[
-    "color", "font", "font-family", "font-size", "font-style", "font-weight", "line-height",
-    "text-align", "text-transform", "white-space", "text-overflow", "vertical-align",
-    "text-decoration", "text-decoration-line", "font-variant", "font-variant-caps",
+    "color",
+    "font",
+    "font-family",
+    "font-size",
+    "font-style",
+    "font-weight",
+    "line-height",
+    "text-align",
+    "text-transform",
+    "white-space",
+    "text-overflow",
+    "vertical-align",
+    "text-decoration",
+    "text-decoration-line",
+    "font-variant",
+    "font-variant-caps",
 ];
 
 /// CSS properties that parse and set nothing on a Roblox instance.
@@ -641,6 +717,7 @@ pub fn apply(decls: &[Decl], ctx: &Ctx, out: &mut Out) {
     let mut flex = FlexParts::default();
     let mut grid = GridParts::default();
     let mut pos = PosParts::default();
+    let mut slice = SliceParts::default();
 
     for d in decls {
         let value = css::substitute(&d.value, ctx.vars);
@@ -684,7 +761,10 @@ pub fn apply(decls: &[Decl], ctx: &Ctx, out: &mut Out) {
             out.problem(
                 span,
                 "bad_value",
-                format!("`{}` names a variable no `:root` rule of this file sets", d.value.trim()),
+                format!(
+                    "`{}` names a variable no `:root` rule of this file sets",
+                    d.value.trim()
+                ),
             );
 
             continue;
@@ -692,7 +772,9 @@ pub fn apply(decls: &[Decl], ctx: &Ctx, out: &mut Out) {
 
         // Text properties on a box are inherited: the text inside takes
         // them, and the box itself has no text to set.
-        if ctx.target == Target::Container && INHERITED.contains(&d.name.as_str()) {
+        if matches!(ctx.target, Target::Container | Target::Panel)
+            && INHERITED.contains(&d.name.as_str())
+        {
             continue;
         }
 
@@ -899,6 +981,101 @@ pub fn apply(decls: &[Decl], ctx: &Ctx, out: &mut Out) {
 
                 None => bad(out),
             },
+
+            // A gradient along the border: a UIGradient inside the UIStroke.
+            // The stroke turns white, so the gradient's colors show as they
+            // are, as `border-image` replaces the border color.
+            // A 9-slice image: the box becomes an ImageLabel, see the
+            // emitter.
+            "border-image" | "border-image-source" if lower.contains("url(") => {
+                nine_slice(v, span, d.name == "border-image", &mut slice, out);
+            }
+
+            "border-image-slice" => match slice_numbers(v, span, &mut slice) {
+                true => {}
+
+                false => bad(out),
+            },
+
+            "border-image-width" => match slice_width(v) {
+                Some(w) => slice.width = Some(w),
+
+                None => bad(out),
+            },
+
+            "border-image-size" => {
+                let n: Vec<f64> = css::words(v)
+                    .iter()
+                    .filter_map(|w| w.trim_end_matches("px").parse::<f64>().ok())
+                    .collect();
+
+                match (n.as_slice(), css::words(v).len()) {
+                    ([w], 1) if *w > 0.0 => slice.size = Some((*w, *w)),
+
+                    ([w, h], 2) if *w > 0.0 && *h > 0.0 => slice.size = Some((*w, *h)),
+
+                    _ => bad(out),
+                }
+            }
+
+            "border-image-outset" | "border-image-repeat" => out.problem(
+                d.name_span,
+                "no_effect",
+                "Roblox stretches a 9-slice inside the box",
+            ),
+
+            "border-image" | "border-image-source" => {
+                let source = v.rfind(')').map_or(v, |end| &v[..=end]);
+
+                match gradient(source) {
+                    Some((seq, rotation, transparency)) => {
+                        out.modifier("UIStroke", "Color", "Color3.new(1, 1, 1)");
+                        out.modifier("UIStroke", "ApplyStrokeMode", "Enum.ApplyStrokeMode.Border");
+                        out.modifier(STROKE_GRADIENT, "Color", seq);
+                        out.modifier(STROKE_GRADIENT, "Rotation", num(rotation));
+
+                        if let Some(t) = transparency {
+                            out.modifier(STROKE_GRADIENT, "Transparency", t);
+                        }
+                    }
+
+                    None if lower == "none" => {}
+
+                    None => bad(out),
+                }
+            }
+
+            // Roblox's own axis of a stroke, 0 to 1, which a source can
+            // drive as it is: `borderTransparency = fade`.
+            "border-transparency" => match v.parse::<f64>() {
+                Ok(t) => {
+                    out.modifier("UIStroke", "Transparency", num(t.clamp(0.0, 1.0)));
+                    out.modifier("UIStroke", "ApplyStrokeMode", "Enum.ApplyStrokeMode.Border");
+                }
+
+                Err(_) => bad(out),
+            },
+
+            "gradient-rotation" => match css::degrees(v).or_else(|| v.parse().ok()) {
+                Some(deg) => out.modifier("UIGradient", "Rotation", num(deg)),
+
+                None => bad(out),
+            },
+
+            // A live gradient takes Luau alone; a literal one is CSS.
+            "background-gradient" | "gradient-transparency" => out.problem(
+                span,
+                "bad_value",
+                format!(
+                    "`{}` takes a Luau value, a {}; write a literal gradient as `background: linear-gradient(...)`",
+                    d.name,
+                    match d.name.as_str() {
+                        "background-gradient" => "ColorSequence",
+
+                        _ => "NumberSequence",
+                    }
+                ),
+            ),
 
             "border-style" => match lower.as_str() {
                 "none" | "hidden" => out.modifier("UIStroke", "Enabled", "false"),
@@ -1152,6 +1329,14 @@ pub fn apply(decls: &[Decl], ctx: &Ctx, out: &mut Out) {
                 _ => bad(out),
             },
 
+            "appearance" | "-webkit-appearance" => match lower.as_str() {
+                "none" => out.plain = true,
+
+                "auto" => out.plain = false,
+
+                _ => bad(out),
+            },
+
             "pointer-events" => match lower.as_str() {
                 "none" => out.set("Interactable", "false"),
 
@@ -1287,7 +1472,11 @@ pub fn apply(decls: &[Decl], ctx: &Ctx, out: &mut Out) {
             }
 
             "object-fit" | "background-size" | "image-rendering" if !ctx.target.has_image() => {
-                out.problem(d.name_span, "no_effect", format!("`{}` fits an image, and this element has none", d.name));
+                out.problem(
+                    d.name_span,
+                    "no_effect",
+                    format!("`{}` fits an image, and this element has none", d.name),
+                );
             }
 
             "object-fit" | "background-size" => {
@@ -1334,6 +1523,208 @@ pub fn apply(decls: &[Decl], ctx: &Ctx, out: &mut Out) {
     finish_flex(out, &flex);
     finish_grid(out, &grid);
     finish_position(out, &pos);
+    finish_slice(out, &slice);
+}
+
+/// The start of the report for a slice with no image size. The emitter
+/// drops it when the tag sets `SliceCenter` itself.
+pub const UNPLACED_SLICE: &str = "Roblox places a slice";
+
+/// The parts of a 9-slice image that `border-image` and its longhands
+/// set. Roblox measures the middle of the image from its top left
+/// corner, so the slice in from each edge needs the size of the image.
+#[derive(Default)]
+struct SliceParts {
+    image: Option<String>,
+    /// In from the top, right, bottom, and left, in pixels of the image.
+    slice: Option<[f64; 4]>,
+    width: Option<SliceWidth>,
+    size: Option<(f64, f64)>,
+    span: (usize, usize),
+}
+
+/// `border-image-width`: a number is the `SliceScale`, and a length is
+/// the width the top edge draws at.
+#[derive(Clone, Copy)]
+enum SliceWidth {
+    Scale(f64),
+    Px(f64),
+}
+
+fn slice_width(v: &str) -> Option<SliceWidth> {
+    let v = v.trim();
+
+    match v.parse::<f64>() {
+        Ok(n) if n > 0.0 => Some(SliceWidth::Scale(n)),
+
+        Ok(_) => None,
+
+        Err(_) => css::length(v)
+            .filter(|l| l.scale == 0.0 && l.offset > 0.0)
+            .map(|l| SliceWidth::Px(l.offset)),
+    }
+}
+
+/// `4`, `4 8`, up to four numbers in pixels of the image, as CSS reads
+/// `border-image-slice`, and `fill`, which Roblox always draws.
+fn slice_numbers(v: &str, span: (usize, usize), parts: &mut SliceParts) -> bool {
+    let mut n = Vec::new();
+
+    for w in css::words(v) {
+        match w.trim_end_matches("px").parse::<f64>() {
+            Ok(x) if x >= 0.0 => n.push(x),
+
+            _ if w.eq_ignore_ascii_case("fill") => {}
+
+            _ => return false,
+        }
+    }
+
+    parts.span = span;
+    parts.slice = Some(match n.as_slice() {
+        [a] => [*a, *a, *a, *a],
+
+        [a, b] => [*a, *b, *a, *b],
+
+        [a, b, c] => [*a, *b, *c, *b],
+
+        [a, b, c, d] => [*a, *b, *c, *d],
+
+        _ => return false,
+    });
+
+    true
+}
+
+/// `url(rbxassetid://1) 4 fill / 8px`: the image, the slice, and the
+/// width, in the order CSS takes them.
+fn nine_slice(
+    v: &str,
+    span: (usize, usize),
+    shorthand: bool,
+    parts: &mut SliceParts,
+    out: &mut Out,
+) {
+    let open = v.to_ascii_lowercase().find("url(").unwrap_or(0);
+    let close = v[open..].find(')').map_or(v.len(), |n| open + n + 1);
+
+    match url(&v[open..close]) {
+        Some(image) => parts.image = Some(image),
+
+        None => return out.problem(span, "bad_value", format!("`{v}` holds no `url()`")),
+    }
+
+    parts.span = span;
+    let rest = format!("{} {}", &v[..open], &v[close..]);
+
+    if !shorthand {
+        if !rest.trim().is_empty() {
+            out.problem(
+                span,
+                "bad_value",
+                "`border-image-source` takes the `url()` alone",
+            );
+        }
+
+        return;
+    }
+
+    let mut sections = rest.split('/');
+    let mut words: Vec<&str> = Vec::new();
+
+    for w in css::words(sections.next().unwrap_or("")) {
+        match w.to_ascii_lowercase().as_str() {
+            "stretch" => {}
+
+            "repeat" | "round" | "space" => out.problem(
+                span,
+                "no_effect",
+                format!("Roblox stretches a 9-slice; it has no `{w}`"),
+            ),
+
+            _ => words.push(w),
+        }
+    }
+
+    if !words.is_empty() && !slice_numbers(&words.join(" "), span, parts) {
+        out.problem(
+            span,
+            "bad_value",
+            format!(
+                "`{}` is not a slice: 1 to 4 numbers and `fill`",
+                words.join(" ")
+            ),
+        );
+    }
+
+    if let Some(w) = sections.next().filter(|w| !w.trim().is_empty()) {
+        match slice_width(w) {
+            Some(w) => parts.width = Some(w),
+
+            None => out.problem(
+                span,
+                "bad_value",
+                format!("`{}` is not a width of the edges", w.trim()),
+            ),
+        }
+    }
+
+    if sections.next().is_some() {
+        out.problem(
+            span,
+            "no_effect",
+            "Roblox draws a 9-slice inside the box; the outset sets nothing",
+        );
+    }
+}
+
+/// The properties of a 9-slice: `Image`, `ScaleType`, `SliceCenter`, and
+/// `SliceScale`.
+fn finish_slice(out: &mut Out, parts: &SliceParts) {
+    if parts.image.is_none() && parts.slice.is_none() && parts.width.is_none() {
+        return;
+    }
+
+    if let Some(image) = &parts.image {
+        out.set("Image", format!("\"{image}\""));
+    }
+
+    out.set("ScaleType", "Enum.ScaleType.Slice");
+
+    if let Some([t, r, b, l]) = parts.slice {
+        match parts.size {
+            Some((w, h)) if l + r < w && t + b < h => out.set(
+                "SliceCenter",
+                format!("Rect.new({}, {}, {}, {})", num(l), num(t), num(w - r), num(h - b)),
+            ),
+
+            Some((w, h)) => out.problem(
+                parts.span,
+                "bad_value",
+                format!("the edges of the slice meet: the image is {} by {} pixels", num(w), num(h)),
+            ),
+
+            None => out.problem(
+                parts.span,
+                "bad_value",
+                format!("{UNPLACED_SLICE} from the top left corner of the image, so it needs the size of the image: add `border-image-size: 32px`, or set `SliceCenter`"),
+            ),
+        }
+    }
+
+    match (parts.width, parts.slice) {
+        (Some(SliceWidth::Scale(s)), _) => out.set("SliceScale", num(s)),
+
+        (Some(SliceWidth::Px(px)), Some([t, ..])) if t > 0.0 => out.set("SliceScale", num(px / t)),
+
+        (Some(SliceWidth::Px(_)), _) => out.problem(
+            parts.span,
+            "bad_value",
+            "a width in pixels needs the slice it scales; give the slice, or a number for the scale",
+        ),
+
+        (None, _) => {}
+    }
 }
 
 /// The value of a Roblox property written in CSS: a color, a number, a
@@ -1350,9 +1741,17 @@ fn roblox_value(name: &str, v: &str) -> String {
     // A length: a UDim where the property takes one, else its pixels.
     let udim = matches!(
         name,
-        "CornerRadius" | "PaddingTop" | "PaddingRight" | "PaddingBottom" | "PaddingLeft" | "Padding"
+        "CornerRadius"
+            | "PaddingTop"
+            | "PaddingRight"
+            | "PaddingBottom"
+            | "PaddingLeft"
+            | "Padding"
     );
-    let pair = matches!(name, "Size" | "Position" | "CellSize" | "CellPadding" | "CanvasSize");
+    let pair = matches!(
+        name,
+        "Size" | "Position" | "CellSize" | "CellPadding" | "CanvasSize"
+    );
 
     if let Some(l) = css::length(v) {
         return match (udim, pair) {
@@ -1436,6 +1835,23 @@ fn gradient(v: &str) -> Option<(String, f64, Option<String>)> {
             .and_then(|p| css::length(p))
             .map_or(k as f64 / (n - 1) as f64, |l| l.scale);
         stops.push((at.clamp(0.0, 1.0), c));
+    }
+
+    // A clear stop takes the color of the nearest stop that shows, as a
+    // browser mixes the colors premultiplied: `gold, transparent` fades
+    // the gold and does not darken it through black.
+    for k in 0..stops.len() {
+        if stops[k].1.a == 0.0 {
+            let near = (1..stops.len())
+                .flat_map(|d| [k.checked_sub(d), Some(k + d)])
+                .flatten()
+                .find(|&j| stops.get(j).is_some_and(|s| s.1.a > 0.0));
+
+            if let Some(j) = near {
+                let a = stops[k].1.a;
+                stops[k].1 = Rgba { a, ..stops[j].1 };
+            }
+        }
     }
 
     let colors = stops

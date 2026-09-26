@@ -33,6 +33,12 @@ pub enum Kind {
     /// `thead`, `tbody`, `tfoot`: a fragment, so the rows reach the table.
     Group,
     Style,
+    /// `html`: the document, a ScreenGui.
+    Document,
+    /// `head`: no instance. What it holds configures the document.
+    Head,
+    /// `title` and `meta` in the head: a property of the ScreenGui.
+    Meta,
     /// `col`, `colgroup`, `source`, `track`: no instance.
     Removed,
     /// No Roblox form.
@@ -160,16 +166,16 @@ pub const TAGS: &[Tag] = &[
     t("h6", Text, "A heading, 11 px and bold."),
     t(
         "head",
-        Unsupported,
-        "The document head. A Roblox UI has no document.",
+        Head,
+        "The document head: no instance. `<title>` names the ScreenGui, a `<meta>` sets one of its properties, and a `<style>` styles the whole document.",
     ),
     t("header", Block, "The header of a section."),
     t("hgroup", Block, "A heading and its subheadings."),
     t("hr", Rule, "A horizontal rule: a Frame one pixel high."),
     t(
         "html",
-        Unsupported,
-        "The document root. A Roblox UI has no document; start from `body` or `div`.",
+        Document,
+        "The document: a ScreenGui. `<head>` configures it, and `<body>` is its root Frame.",
     ),
     t("i", Inline, "Text in italics."),
     t(
@@ -207,8 +213,8 @@ pub const TAGS: &[Tag] = &[
     t("menu", Block, "A list of commands."),
     t(
         "meta",
-        Unsupported,
-        "Document metadata. A Roblox UI has no document.",
+        Meta,
+        "Document metadata in the `<head>`: `display-order`, `ignore-inset`, `reset-on-spawn`, and `viewport` set the ScreenGui.",
     ),
     t(
         "meter",
@@ -315,8 +321,8 @@ pub const TAGS: &[Tag] = &[
     t("time", Inline, "A date or a time."),
     t(
         "title",
-        Unsupported,
-        "The document title. A Roblox UI has no document.",
+        Meta,
+        "The document title in the `<head>`: the ScreenGui's `Name`.",
     ),
     t("tr", Row, "A table row."),
     t("track", Removed, "A text track of a media element."),
@@ -369,7 +375,9 @@ pub fn class_of(tag: &Tag, input_type: Option<&str>) -> Option<&'static str> {
 
         Canvas => "CanvasGroup",
 
-        Break | Group | Style | Removed | Unsupported => return None,
+        Document => "ScreenGui",
+
+        Break | Group | Style | Head | Meta | Removed | Unsupported => return None,
     })
 }
 
@@ -532,11 +540,13 @@ impl Raw<'_> {
         }
     }
 
-    fn not(self) -> String {
+    /// The value negated. An expression goes through the `_not` helper,
+    /// since it may be a source: `not busy` of a function is always false.
+    fn not(self, helper: &str) -> String {
         match self.on() {
             Some(b) => (!b).to_string(),
 
-            None => format!("not ({})", self.luau()),
+            None => format!("{helper}_not({})", self.luau()),
         }
     }
 }
@@ -611,12 +621,6 @@ const EVENTS: &[(&str, &str, &str, &str)] = &[
         "fires when a TextBox loses the focus",
     ),
     (
-        "onchange",
-        "onChange",
-        "FocusLost",
-        "fires when a TextBox commits: it loses the focus",
-    ),
-    (
         "onkeydown",
         "onKeyDown",
         "InputBegan",
@@ -630,10 +634,26 @@ const EVENTS: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
+/// The handlers that run on each change of a text input, as React runs
+/// `onChange`. Roblox has no event for them; the helper listens to
+/// `Text` and passes the new text.
+const CHANGES: &[(&str, &str)] = &[("onchange", "onChange"), ("oninput", "onInput")];
+
+/// What a change handler does, for the editor.
+pub const CHANGE_DOC: &str =
+    "runs on each change of the text, with the new text: `function(text) ... end` or a source";
+
+/// What `maxLength` does, for the editor.
+const MAX_LENGTH_DOC: &str = "the most characters the text holds; the helper cuts the rest";
+
+/// Whether an attribute is a change handler: `onChange` or `onInput`.
+pub fn is_change(name: &str) -> bool {
+    CHANGES.iter().any(|(l, _)| name.eq_ignore_ascii_case(l))
+}
+
 /// React events with no Roblox event behind them.
 const NO_EVENTS: &[(&str, &str)] = &[
     ("ondblclick", "onDoubleClick"),
-    ("oninput", "onInput"),
     ("onsubmit", "onSubmit"),
     ("onwheel", "onWheel"),
     ("onscroll", "onScroll"),
@@ -688,6 +708,7 @@ pub fn react_name(name: &str) -> Option<&'static str> {
         .iter()
         .copied()
         .chain(EVENTS.iter().map(|(l, r, ..)| (*l, *r)))
+        .chain(CHANGES.iter().copied())
         .chain(NO_EVENTS.iter().copied())
         .find(|(l, _)| *l == name)
         .map(|(_, r)| r)
@@ -757,7 +778,9 @@ pub fn attributes(tag: &Tag, input_type: Option<&str>) -> Vec<(&'static str, &'s
                     "disabled",
                     "`TextEditable={false}` and `Interactable={false}`",
                 ),
-                ("maxLength", "nothing: a TextBox has no limit"),
+                ("maxLength", MAX_LENGTH_DOC),
+                ("onChange", CHANGE_DOC),
+                ("onInput", CHANGE_DOC),
             ],
         },
 
@@ -771,6 +794,9 @@ pub fn attributes(tag: &Tag, input_type: Option<&str>) -> Vec<(&'static str, &'s
             ),
             ("rows", "the height of `Size`"),
             ("cols", "the width of `Size`"),
+            ("maxLength", MAX_LENGTH_DOC),
+            ("onChange", CHANGE_DOC),
+            ("onInput", CHANGE_DOC),
         ],
 
         Button => &[
@@ -815,6 +841,17 @@ pub fn attributes(tag: &Tag, input_type: Option<&str>) -> Vec<(&'static str, &'s
 
         Block if tag.name == "dialog" => &[("open", "`Visible`")],
 
+        Document => &[("lang", "nothing: Roblox localizes by its own tables")],
+
+        Meta if tag.name == "meta" => &[
+            (
+                "name",
+                "`display-order`, `ignore-inset`, `reset-on-spawn`, or `viewport`",
+            ),
+            ("content", "the value the name sets"),
+            ("charset", "nothing: the text is UTF-8"),
+        ],
+
         Cell => &[
             ("colSpan", "nothing: a UITableLayout has no spans"),
             ("rowSpan", "nothing: a UITableLayout has no spans"),
@@ -830,8 +867,9 @@ pub fn attributes(tag: &Tag, input_type: Option<&str>) -> Vec<(&'static str, &'s
     out
 }
 
-/// What an attribute on a tag becomes.
-pub fn map(tag: &Tag, name: &str, value: Raw, input_type: Option<&str>) -> Mapped {
+/// What an attribute on a tag becomes. `helper` names the helpers the
+/// transform writes.
+pub fn map(tag: &Tag, name: &str, value: Raw, input_type: Option<&str>, helper: &str) -> Mapped {
     let lower = name.to_ascii_lowercase();
 
     // A Roblox name, `key`, or an ingot's prop passes as written.
@@ -845,6 +883,20 @@ pub fn map(tag: &Tag, name: &str, value: Raw, input_type: Option<&str>) -> Mappe
 
     if let Some((event, _)) = event(&lower) {
         return Mapped::Event(event);
+    }
+
+    if is_change(&lower) {
+        let text = match tag.kind {
+            Input => !matches!(input_type, Some("button" | "submit" | "reset")),
+
+            _ => tag.kind == TextArea,
+        };
+
+        return match text {
+            true => Mapped::Read,
+
+            false => Mapped::NoEffect("only a text input changes as the player types"),
+        };
     }
 
     if NO_EVENTS.iter().any(|(l, _)| *l == lower) {
@@ -864,7 +916,15 @@ pub fn map(tag: &Tag, name: &str, value: Raw, input_type: Option<&str>) -> Mappe
 
         (Input, "type") => Mapped::Read,
 
-        (_, "hidden") => Mapped::Props(vec![("Visible", value.not())]),
+        (Meta, "name" | "content") => Mapped::Read,
+
+        (Meta, "charset" | "http-equiv" | "property" | "media") => Mapped::Drop,
+
+        (Document, "hidden") => Mapped::Props(vec![("Enabled", value.not(helper))]),
+
+        (Document, "xmlns" | "manifest" | "prefix") => Mapped::Drop,
+
+        (_, "hidden") => Mapped::Props(vec![("Visible", value.not(helper))]),
 
         (_, "tabindex") => Mapped::Props(vec![(
             "SelectionOrder",
@@ -908,20 +968,20 @@ pub fn map(tag: &Tag, name: &str, value: Raw, input_type: Option<&str>) -> Mappe
 
         (Input | TextArea, "value" | "defaultvalue") | (Button, "value") => Mapped::Rename("Text"),
 
-        (Input | TextArea, "readonly") => Mapped::Props(vec![("TextEditable", value.not())]),
+        (Input | TextArea, "readonly") => Mapped::Props(vec![("TextEditable", value.not(helper))]),
 
         (Input, "disabled") if matches!(input_type, Some("button" | "submit" | "reset")) => {
-            Mapped::Props(vec![("Interactable", value.not())])
+            Mapped::Props(vec![("Interactable", value.not(helper))])
         }
 
         (Input | TextArea, "disabled") => Mapped::Props(vec![
-            ("TextEditable", value.not()),
-            ("Interactable", value.not()),
+            ("TextEditable", value.not(helper)),
+            ("Interactable", value.not(helper)),
         ]),
 
         (Button, "disabled") => Mapped::Props(vec![
-            ("Interactable", value.not()),
-            ("AutoButtonColor", value.not()),
+            ("Interactable", value.not(helper)),
+            ("AutoButtonColor", value.not(helper)),
         ]),
 
         (TextArea, "rows" | "cols" | "wrap") => Mapped::Read,
@@ -932,12 +992,13 @@ pub fn map(tag: &Tag, name: &str, value: Raw, input_type: Option<&str>) -> Mappe
 
         (Text, "value") if tag.name == "li" => Mapped::Read,
 
+        (Input | TextArea, "maxlength") => Mapped::Read,
+
         (
             Input | TextArea,
-            "maxlength" | "minlength" | "pattern" | "required" | "min" | "max" | "step" | "name"
-            | "autocomplete" | "form" | "size" | "list" | "inputmode" | "spellcheck"
-            | "autocapitalize",
-        ) => Mapped::NoEffect("a TextBox checks nothing the player types; check it in the handler"),
+            "minlength" | "pattern" | "required" | "min" | "max" | "step" | "name" | "autocomplete"
+            | "form" | "size" | "list" | "inputmode" | "spellcheck" | "autocapitalize",
+        ) => Mapped::NoEffect("a TextBox checks nothing the player types; check it in `onChange`"),
 
         (Button, "type" | "name" | "form" | "formaction" | "formmethod" | "popovertarget") => {
             Mapped::Drop
@@ -1041,31 +1102,34 @@ mod tests {
         let button = tag("button").unwrap();
 
         assert_eq!(
-            map(img, "src", Raw::Str("rbxassetid://1"), None),
+            map(img, "src", Raw::Str("rbxassetid://1"), None, "__silk"),
             Mapped::Rename("Image")
         );
         assert_eq!(
-            map(button, "onClick", Raw::Expr("go"), None),
+            map(button, "onClick", Raw::Expr("go"), None, "__silk"),
             Mapped::Event("Activated")
         );
         assert_eq!(
-            map(button, "disabled", Raw::Bare, None),
+            map(button, "disabled", Raw::Bare, None, "__silk"),
             Mapped::Props(vec![
                 ("Interactable", "false".into()),
                 ("AutoButtonColor", "false".into())
             ])
         );
         assert_eq!(
-            map(img, "hidden", Raw::Expr("x"), None),
-            Mapped::Props(vec![("Visible", "not (x)".into())])
+            map(img, "hidden", Raw::Expr("x"), None, "__silk"),
+            Mapped::Props(vec![("Visible", "__silk_not(x)".into())])
         );
-        assert_eq!(map(img, "aria-label", Raw::Str("a"), None), Mapped::Drop);
+        assert_eq!(
+            map(img, "aria-label", Raw::Str("a"), None, "__silk"),
+            Mapped::Drop
+        );
         assert_eq!(react_name("class"), Some("className"));
         assert_eq!(react_name("onclick"), Some("onClick"));
         assert_eq!(react_name("onClick"), None);
         assert_eq!(react_name("src"), None);
         assert_eq!(
-            map(img, "BackgroundColor3", Raw::Expr("c"), None),
+            map(img, "BackgroundColor3", Raw::Expr("c"), None, "__silk"),
             Mapped::Keep
         );
     }

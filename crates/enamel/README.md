@@ -14,7 +14,19 @@ them into the properties and the layout children behind them:
 The `Frame` gets `BackgroundColor3`, `BackgroundTransparency`, and
 `Size`, plus a `UIListLayout`, a `UIPadding`, and a `UICorner` child.
 The button's `hover:` wraps the element in a one-line helper that
-connects `MouseEnter` and `MouseLeave`.
+connects `MouseEnter` and `MouseLeave`. In the element form, for React,
+an element is no instance, so the helper takes the instance as a `ref`,
+through a spread. It sets up once for each instance. When Silk wrote a
+`ref` on the tag, the helper calls that `ref` too. In a text element, a body of one
+`{ }` hole is the Text. When the classes add a child there, the hole
+becomes a `Text={...}` attribute, so it does not turn into a child.
+
+Vide and Fusion use the table form of `[alx.factory]`. The host sends
+the factory at init, from `alloy.toml` or `.config.aly` alike. An older
+host sends none, and Enamel takes the element form. In the table form,
+a one-line component calls `Instance.new` for each child that the
+classes add. Vide types its factory over 19 classes, so a factory
+call for a `UIPadding` or a `UIStroke` fails the type check.
 
 ## What maps
 
@@ -34,13 +46,23 @@ connects `MouseEnter` and `MouseLeave`.
 | `opacity-*`, `hidden`, `z-*`, `order-*`, `rotate-*`, `scale-*` | transparencies, `Visible`, `ZIndex`, `LayoutOrder`, `Rotation`, `UIScale` |
 | `min-w-*`, `max-w-*`, `aspect-*` | `UISizeConstraint`, `UIAspectRatioConstraint` |
 | `object-cover`, `object-contain` | `ScaleType` |
-| `overflow-hidden`, `overflow-scroll`, `scrollbar-*` | `ClipsDescendants`, `ScrollingEnabled`, `ScrollBarThickness` |
+| `overflow-hidden`, `overflow-auto`, `overflow-y-auto`, `overflow-x-auto`, `scrollbar-*` | `ClipsDescendants`, `ScrollingEnabled`, `ScrollBarThickness`; on a Silk box, a ScrollingFrame |
+| `appearance-none` | nothing on a Roblox class; on a Silk control, no browser look |
 | `hover:`, `active:`, `focus:`, `group`, `group-hover:` | the state helper |
 | `transition`, `transition-colors`, `duration-300`, `duration-[0.3s]`, `ease-out`, `ease-back-in`, `delay-100` | a TweenService tween on each state change |
 | `w-[200px]`, `bg-[#ff0000]`, `text-[14px]` | arbitrary values |
 
+`w-auto` and `h-auto` set `AutomaticSize` on their axis and start that
+axis at 0, so the content sets it. An axis that no class names keeps the
+element's own size. With a `Size` attribute on the tag, the classes set
+their axes inside it, and a source stays a source: a Vide function, a
+React binding, or a Fusion state, which the merge derives through the
+`compute` of the factory. With no attribute,
+the axis keeps the Roblox default of 100 pixels.
+
 A `transition` makes each state change a tween: 150ms, Quad in-out,
-over the colors, the transparencies, position, size, and rotation.
+over the colors, the transparencies, position, size, rotation, scale,
+and stroke width.
 `transition-colors`, `transition-opacity`, `transition-transform`, and
 `transition-all` narrow or widen that. `duration-*` and `delay-*` take
 milliseconds, or a bracket time with a unit, `[0.3s]`. `ease-*` names a
@@ -48,6 +70,15 @@ Roblox easing style, `ease-back`, `ease-bounce`, `ease-expo`, with
 `-in`, `-out`, or `-in-out` behind it; `ease-in`, `ease-out`, and
 `ease-in-out` are Quad. A property a tween cannot move, a font or a
 boolean, is set at once.
+
+A state changes a property of the element, a scale, or a stroke.
+`hover:scale-110`, `hover:ring-4`, and `hover:stroke-yellow-400` change
+the UIScale or the UIStroke child. With no such class at rest, the child
+starts at a scale of 1 or a stroke of no width, as in Tailwind. A
+padding, a layout, or a corner cannot change with a state, and the
+`no_effect` lint says so. A source, such as a Vide function, can drive a
+property that a state changes. When the state ends, the element goes
+back to the latest value of that source.
 
 A margin, a shadow, or a cursor has no property on a GuiObject: the
 class parses and the `no_effect` lint says so. A text utility on a

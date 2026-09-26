@@ -48,6 +48,27 @@ Silk follows React where React and HTML differ:
   pixels, except for the unitless properties React knows (`opacity`,
   `zIndex`, `flexGrow`, `fontWeight`, `lineHeight`, and the rest). A
   `style` string is a `react_style` error.
+- A value in `style` can be Luau, as in React, for a property with one
+  Roblox property behind it: `backgroundColor`, `color`,
+  `borderColor`, `borderWidth`, `rotate`, `scale`, and `zIndex`. The
+  value is what the Roblox property takes, a `Color3` or a number, and
+  a source stays live: `style={{ scale = grow }}` sets the `Scale` of
+  a UIScale. Another property takes a literal alone.
+- `borderTransparency` sets the `Transparency` of the UIStroke, from 0
+  to 1, as a literal or as a Luau value. CSS has no property for the
+  alpha of a border apart from its color. The name is Roblox's, and
+  the value is the Roblox value, so a source of any library passes to
+  the stroke as it is, with no helper to invert it. Enamel's
+  `stroke-transparency-*` uses the same word.
+- A live gradient is Luau: `backgroundGradient` takes a ColorSequence
+  or a source of one, and `gradientTransparency` a NumberSequence or a
+  source of one. The direction is static: `gradientRotation` in
+  degrees, or an Enamel class such as `bg-gradient-to-b`, which Silk
+  then reads in place of Enamel. A box with no background color shows
+  white under the gradient, as CSS shows a gradient. A gradient of
+  literal colors is CSS: `background: linear-gradient(...)`.
+- A live image id for a 9-slice is Luau: `borderImageSource` takes an
+  id or a source of one, as the `Image`. See [9-slice images](#9-slice-images).
 - Text takes HTML character references: `&copy;`, `&nbsp;`, `&mdash;`,
   `&#169;`.
 
@@ -73,17 +94,129 @@ reads it, so `--name` and `{` mean CSS there. The React form works too:
 | `hr` | a Frame one pixel high |
 | `progress`, `meter` | a bar with a fill for `value` of `max` |
 | `style` | a StyleLink to a StyleSheet |
+| `html`, `head`, `body`, `title`, `meta` | a ScreenGui, configured by its head, with a Frame that fills the screen; see [The document](#the-document) |
 
 A box that holds only text becomes a TextLabel. A `{ }` hole is not text:
 it may hold elements, as `{children}` does. So `<div>{name}</div>` stays
 a Frame and shows nothing. Write `<p>{name}</p>`, or text beside the
-hole, as in `<div>Name: {name}</div>`. A text element that holds
-boxes becomes a Frame, and each run of its text becomes a TextLabel of its
-own. An element with `onClick` becomes a button: a Frame is a TextButton,
+hole, as in `<div>Name: {name}</div>`. A hole beside a `Text` you write
+is a child too: `<button Text={label}>{icon}</button>`. So is a hole
+beside an element that stands as an instance of its own, with no text
+there: `<button>{icon}<img src={art} /></button>` shows both, and no
+text. An inline tag that folds into the text is text, so in
+`<button>{count}<b>!</b></button>` the hole is text. A text element
+that holds boxes becomes a Frame, and each run of its text becomes a
+TextLabel of its own. An element with `onClick` becomes a button: a Frame is a TextButton,
 and an ImageLabel is an ImageButton.
+
+Each child of a box takes the `LayoutOrder` of its place, so the
+UIListLayout keeps the source order. A hole and a component take theirs
+through the `__silk_order` helper, which sets it on the instance they
+give, on each instance of a list in turn, and again each time a
+function child runs. In a box that holds a hole, one place is 1000
+numbers wide, so a list in the hole keeps its own order.
+
+An item of a list that sets its own `LayoutOrder` keeps that order in
+the place of the hole. The helper adds the place to the order of the
+item, and does it again each time the item changes its order. An item
+with no order takes its place in the list. Vide's `values` returns its
+items in no fixed order, so each item binds the index that `values`
+gives it:
+
+```alx
+<div className="flex-col">
+    {vide.values(lines, function(line: string, index: () -> number)
+        return <p LayoutOrder={index}>{line}</p>
+    end)}
+</div>
+```
+
+A child that places itself stands out of the flow, as `position:
+absolute` does in CSS. It has a `Position` attribute, `position:
+absolute` or `fixed`, an offset such as `top` or `inset`, or an Enamel
+class such as `absolute`, `inset-0`, or `center`. A UIListLayout would
+move that child, so its box writes no layout, and each child stands
+where it places itself, as in a Roblox Frame. A layout that the author
+asks for, `display: flex` or a `flex` class, stays. A button keeps its
+text beside such a child. So a screen of layers is a box of absolute
+children:
+
+```alx
+<div className="w-full h-full">
+    <div className="absolute inset-0">{background}</div>
+    <main className="center w-[640px] p-6">...</main>
+</div>
+```
+
+A child of a flex or a grid box is an item of its own, as CSS makes it:
+`<div className="flex"><span>L</span><span>R</span></div>` is a Frame
+with two TextLabels in a row. An inline tag with a class keeps its own
+instance too, so the class has something to style, unless text stands
+beside it. In `<p>Hi <b className="x">there</b></p>` the `b` is RichText,
+and the `no_effect` lint says that the class sets nothing.
 
 `select`, `iframe`, `svg`, `script`, a checkbox, and the other elements
 with no Roblox form are `unsupported_tag` errors.
+
+## The document
+
+A component can return a whole document. `<html>` is a ScreenGui.
+`<head>` makes no instance: its tags configure the ScreenGui. `<body>` is
+a Frame that fills the screen, and it takes classes and children as a
+`div` does.
+
+```alx
+export function App(props: { title: () -> string })
+    return <html>
+        <head>
+            <title>{props.title}</title>
+            <meta name="display-order" content="10" />
+            <meta name="ignore-inset" />
+            <meta name="reset-on-spawn" content="false" />
+            <meta name="viewport" content="width=1280, height=720, minimum-scale=0.5, maximum-scale=2" />
+            <style>
+                .panel { background-color: #101014; border-radius: 12px; }
+            </style>
+        </head>
+        <body>
+            <main className="panel">Welcome</main>
+        </body>
+    </html>
+end
+```
+
+| In the head | Roblox |
+| --- | --- |
+| `<title>` | the `Name` of the ScreenGui |
+| `<meta name="display-order" content="10" />` | `DisplayOrder` |
+| `<meta name="ignore-inset" />` | `ScreenInsets = None`; `content="false"` keeps `CoreUISafeInsets` |
+| `<meta name="reset-on-spawn" content="false" />` | `ResetOnSpawn` |
+| `<meta name="viewport" content="..." />` | the body in design pixels, scaled to the screen |
+| `<style>` | a StyleLink of the ScreenGui, so its rules reach the whole document |
+
+A meta with no `content` is on. A `{ }` value in `content` or in the
+title is a Luau value, so a source stays live: `content={order}`. For
+`ignore-inset`, such a value sets `IgnoreGuiInset`, which takes a
+boolean as it is. `<meta charset>` sets nothing, and another name
+reports `no_effect`. The ScreenGui stacks by `ZIndexBehavior.Sibling`,
+as CSS stacks `z-index` among siblings.
+
+The viewport takes the keys of HTML's viewport: `width` and `height` in
+design pixels, `minimum-scale` and `maximum-scale` (`min-scale` and
+`max-scale` also work), and `initial-scale` when there is no design
+size. A UIScale scales the body to the `AbsoluteSize` of the ScreenGui.
+That size leaves out the top bar when the document keeps the insets, so
+the whole design size shows under the bar. Before the ScreenGui has a
+size, the camera's `ViewportSize` stands in. The scale is the smaller
+of the two ratios of the screen to the design size, clamped to the
+bounds. The body is the screen divided by that scale, so every size
+inside it reads in design pixels. `width=device-width,
+initial-scale=1` scales nothing. The UIScale is the body's child
+`viewport`, so code can read the scale from its `Scale`.
+
+The viewport needs the body as an instance. In the table form, the
+helper builds the body and fits it. In the element form, React gives
+the instance to the helper as a `ref`, through a spread.
 
 ## Attributes
 
@@ -98,10 +231,20 @@ with no Roblox form are `unsupported_tag` errors.
 | `width`, `height` on media | `Size` |
 | `placeholder`, `value`, `readOnly`, `disabled` | `PlaceholderText`, `Text`, `TextEditable`, `Interactable` |
 | `autoPlay`, `loop`, `muted` | `Playing`, `Looped`, `Volume` |
-| `onClick`, `onMouseEnter`, `onMouseLeave`, `onMouseDown`, `onMouseUp`, `onMouseMove`, `onContextMenu`, `onFocus`, `onBlur`, `onChange`, `onKeyDown`, `onKeyUp` | `Activated`, `MouseEnter`, `MouseLeave`, `MouseButton1Down`, `MouseButton1Up`, `MouseMoved`, `MouseButton2Click`, `Focused`, `FocusLost`, `FocusLost`, `InputBegan`, `InputEnded` |
+| `onClick`, `onMouseEnter`, `onMouseLeave`, `onMouseDown`, `onMouseUp`, `onMouseMove`, `onContextMenu`, `onFocus`, `onBlur`, `onKeyDown`, `onKeyUp` | `Activated`, `MouseEnter`, `MouseLeave`, `MouseButton1Down`, `MouseButton1Up`, `MouseMoved`, `MouseButton2Click`, `Focused`, `FocusLost`, `InputBegan`, `InputEnded` |
+| `onChange`, `onInput`, `maxLength` on a text input | a listener on `Text` that the helper connects |
+
+`onChange` and `onInput` run on each key, as React runs `onChange`. The
+handler takes the new text, so a source works as one:
+`<input onChange={name} />` writes into `name`. `maxLength` cuts the text
+to that many characters. `onBlur` runs when the input loses the focus.
+
+`hidden`, `readOnly`, and `disabled` negate their value. A source stays
+live: `disabled={busy}` writes a function that reads `busy`, so the
+button follows it.
 
 `aria-*`, `data-*`, `alt`, and the other attributes with nothing behind
-them drop without a word. `title`, `maxLength`, `colSpan`, and a few
+them drop without a word. `title`, `minLength`, `colSpan`, and a few
 others drop with a `no_effect` warning.
 
 ## CSS
@@ -114,6 +257,8 @@ A `style` table and a `<style>` rule take the same properties:
 | `width`, `height`, `min-*`, `max-*`, `aspect-ratio` | `Size`, `AutomaticSize`, a UISizeConstraint, a UIAspectRatioConstraint |
 | `padding` | a UIPadding |
 | `border`, `border-width`, `border-color`, `border-style`, `outline` | a UIStroke |
+| `border-image: linear-gradient()` in a `style` table | a UIGradient inside the UIStroke, which turns white so the gradient shows |
+| `border-image: url() 4 fill`, `border-image-slice`, `border-image-width`, `border-image-size` | a 9-slice: an ImageLabel or an ImageButton with `ScaleType.Slice`, `SliceCenter`, and `SliceScale` |
 | `border-radius` | a UICorner |
 | `display: flex`, `flex-direction`, `justify-content`, `align-items`, `gap`, `flex-wrap` | the UIListLayout |
 | `display: grid`, `grid-template-columns`, `grid-auto-rows`, `gap` | a UIGridLayout |
@@ -121,6 +266,7 @@ A `style` table and a `<style>` rule take the same properties:
 | `position`, `top`, `left`, `right`, `bottom`, `transform: translate()` | `Position`, `AnchorPoint` |
 | `transform: rotate()`, `rotate`, `transform: scale()`, `scale`, `z-index` | `Rotation`, a UIScale, `ZIndex` |
 | `display: none`, `visibility`, `overflow`, `pointer-events` | `Visible`, `ClipsDescendants`, a ScrollingFrame, `Interactable` |
+| `appearance: none` on a `button`, an `input`, or a `textarea` | no background, border, corner, or padding from the browser's look |
 | `font`, `font-family`, `font-size`, `font-weight`, `font-style`, `line-height` | `FontFace`, `TextSize`, `LineHeight` |
 | `text-align`, `vertical-align`, `white-space`, `text-overflow` | `TextXAlignment`, `TextYAlignment`, `TextWrapped`, `TextTruncate` |
 | `text-decoration`, `text-transform` in a `style` table | RichText `<u>`, `<s>`, `<uc>`, `<sc>` |
@@ -151,16 +297,115 @@ The priority is the CSS specificity, then the order of the rules, and
 Sibling combinators, attribute selectors, most pseudo-classes,
 pseudo-elements, and at-rules report `unsupported_css`.
 
+### 9-slice images
+
+`border-image` with a `url()` draws a 9-slice image, as CSS draws a
+border image. A box becomes an ImageLabel, and a button, or a box with
+`onClick`, an ImageButton. Its text stands in TextLabels of its own, as
+text beside a box does, and takes the text properties of the element.
+
+```css
+.panel { border-image: url(rbxassetid://123) 4 fill / 8px; border-image-size: 32px; }
+```
+
+The slice is 1 to 4 numbers in from the edges, in pixels of the image,
+as CSS reads it. Roblox measures `SliceCenter` from the top left corner
+of the image, and a script cannot read the size of an image. So the
+slice needs `border-image-size`, the width and the height of the image
+in pixels. Above, the slice is `SliceCenter = Rect.new(4, 4, 28, 28)`.
+A `SliceCenter` on the tag takes the place of the slice and the size.
+The width after the slash, or `border-image-width`, is the
+`SliceScale`: a number as it is, or a length over the top slice, so
+`4 fill / 8px` draws the edges at twice their size. The middle always
+draws, as `fill` asks. A button drops the border and the corner of its
+browser look, since the image draws the border.
+
+A live image id goes in `borderImageSource`, and the Roblox properties
+of the image go on the tag:
+
+```alx
+<div style={{ borderImageSource = id, imageRendering = "pixelated" }} SliceCenter={art.center} SliceScale={art.scale}>
+    {props.children}
+</div>
+```
+
 ## With Enamel
 
 In a project that loads Enamel, `className` holds both kinds of class.
 Silk passes the list to Enamel as `ClassName`, and Enamel writes its
-utilities. Silk leaves out its own background, padding, corner, border,
-and layout defaults where an Enamel utility sets them. Every class also
-becomes a tag, so `.card` in a `<style>` still matches. In the editor,
-Enamel completes and explains its utilities in `className`, and does not
-report a class it does not know on an HTML element, since that is a CSS
-class.
+utilities. Silk leaves out each default that a utility sets, and only
+that one: `text-white` replaces the text color and keeps the size of an
+`h1`, and `bg-gradient-to-b` adds a UIGradient and keeps the clear
+background. A class with a state variant, `hover:bg-red-500`, keeps the
+default for the resting look.
+
+A class of the project's `enamel.aly` counts as the utilities or the
+properties behind it. With `panel = 'bg-glass/75 rounded-2xl stroke'`,
+the class replaces the background, the corner, and the border of a
+`<button className="panel">`. A `w-` or `h-` class sets its axis inside
+the `Size` Silk writes, and the other axis keeps Silk's size. Enamel
+writes `AutomaticSize`, so Silk passes its own automatic axis on as a
+class: `<div className="w-full">` keeps its automatic height as
+`w-full h-auto`.
+
+`appearance-none` drops the browser's look of a control, as
+`appearance: none` does, so `<button className="appearance-none">` is a
+bare TextButton that the other classes style.
+
+An overflow class makes the box a ScrollingFrame, as `overflow: auto`
+does: `overflow-y-auto` scrolls down, `overflow-x-auto` sideways, and
+`overflow-auto` both ways. The canvas grows with the content.
+
+Every class also becomes a tag, so `.card` in a `<style>` still
+matches. In the editor, Enamel completes and explains its utilities in
+`className`, and does not report a class it does not know on an HTML
+element, since that is a CSS class.
+
+## Each factory
+
+Silk writes for each `[alx.factory]` that Alloy lowers. The host sends
+the factory at init, from `alloy.toml` or `.config.aly` alike. An older
+host sends none, and Silk takes the element form, as Alloy does with no
+`[alx]`.
+
+The table form, `create(name)(props)`, is for Vide, Fluid, and Fusion.
+Vide types its factory over 19 classes, with no UIPadding, UIStroke,
+StyleLink, VideoFrame, or Sound, and types each event's handler by its
+signal. So in the table form, Silk writes each child it adds, and each
+`<video>` and `<audio>`, as the `__silk_child` component, which calls
+`Instance.new`. A child with a Luau value from `style` also takes
+`Make`, the `create` of the factory, so the library binds a source in
+it. Silk passes each handler through `__silk_on`, so a `() -> ()` fits
+`Activated`. A helper that needs the instance builds the element
+inside a function it calls once.
+
+The element form, `React.createElement(name, props, children)`, is for
+React. It keeps the Roblox tags and the handlers as written. A React
+element is no instance, so a helper that needs the instance takes it as
+a `ref`, through a spread: `{{ ref = __silk(nil, "card", ...) }}`. React
+calls the `ref` again on each render, so the helper sets up once for
+each instance and keeps the latest handler. The `ref` of Enamel calls
+this `ref` too.
+
+A reactive value reaches the helpers in the shape of its library: a
+Vide or Fluid source is a function, a React binding has `map`, and a
+Fusion state derives through the `compute` of the factory, which Silk
+passes to the helper when the project sets one.
+
+| Feature | Vide, Fluid (table) | Fusion (table, `compute`) | React (element) |
+| --- | --- | --- | --- |
+| `<html>`, `<head>`, `<title>`, `<meta>`, `<body>` | yes | yes | yes |
+| the viewport scale | the helper builds the body | the helper builds the body | a `ref` |
+| a box with a child that places itself, `overflow-y-auto`, `appearance: none`, `border-image` | yes | yes | yes |
+| a 9-slice, and a live `borderImageSource` | yes, a source stays live | yes, a state stays live | yes, a binding stays live |
+| a Luau value in `style`, `borderTransparency`, `backgroundGradient` | yes, a source stays live | yes, a state stays live | yes, a binding stays live |
+| `className` tags, `href`, `onChange`, `maxLength` | the helper builds the element | the helper builds the element | a `ref` |
+| `disabled`, `hidden`, `readOnly` of a reactive value | a function | through `compute` | `map` |
+| a `{ }` hole in RichText | a function | through `compute` | `map` |
+| the order of a hole or a component in a box | yes | yes | no: a React element has no `LayoutOrder` to set |
+
+`interpolate = "plain"` and `"wrap"` both work: Silk writes the same
+markup, and Alloy lowers its text.
 
 ## Options
 
@@ -189,16 +434,21 @@ shows its swatch.
 
 ## Limits
 
-- Tags and links need a target whose elements are instances, as Vide and
-  Fusion build them: the helper calls `AddTag` and connects `Activated` on
-  the element. On React, set `tags = false`.
+- The `order` helper sets `LayoutOrder` on the instances a hole or a
+  component gives. A React element is no instance, so under React a hole
+  or a component in a box keeps its own `LayoutOrder`; give it one.
 - A StyleRule overrides a property set on the instance. So a `<style>`
   rule wins over a `style` table, which is the reverse of CSS.
 - A rule sets `Size` and `FontFace` whole. A rule with `width` alone takes
   an automatic height, and a rule with `font-weight` alone takes the
   default family.
+- A rule makes an element a 9-slice only when its selector is one
+  class, id, or tag that the element has as written. Silk decides the
+  class of an instance when it compiles, and a StyleRule cannot change
+  it.
 - A type selector matches the instance's `Name`. An element with an `id`
   has that `id` as its `Name`, so `h1` does not match `<h1 id="title">`;
   `#title` does.
-- A UIListLayout places every child, so `position: absolute` inside a box
-  that stacks its children does not take the child out of the flow.
+- A Roblox Frame has a layout for all its children or for none. When one
+  child places itself, the others stand at the top left of the box.
+  Put the children that flow in a box of their own.

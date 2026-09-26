@@ -463,6 +463,26 @@ pub struct ColorValue {
     pub expr: String,
     pub rgb: Option<(u8, u8, u8)>,
     pub alpha: f64,
+    /// The color is a name from the theme file, so the file needs the
+    /// theme's prelude: the expression may name a local there.
+    pub theme: bool,
+}
+
+impl ColorValue {
+    /// The utility that sets this color through `pieces`, with its
+    /// swatch at `alpha`. Every color class ends here, so a theme color
+    /// marks the theme as used in one place.
+    fn utility(&self, mut pieces: Vec<Piece>, summary: String, alpha: f64) -> Utility {
+        if self.theme {
+            pieces.push(Piece::Theme);
+        }
+
+        Utility {
+            pieces,
+            summary,
+            color: self.rgb.map(|rgb| (rgb, alpha)),
+        }
+    }
 }
 
 /// A color word: a palette name, `white`, a name from the theme,
@@ -484,6 +504,7 @@ pub fn color(word: &str, theme: &Theme) -> Option<ColorValue> {
                 expr: color3(c),
                 rgb: Some(c),
                 alpha,
+                theme: false,
             });
         }
 
@@ -493,6 +514,7 @@ pub fn color(word: &str, theme: &Theme) -> Option<ColorValue> {
             expr: inner.replace('_', " "),
             rgb: None,
             alpha,
+            theme: false,
         });
     }
 
@@ -509,6 +531,7 @@ pub fn color(word: &str, theme: &Theme) -> Option<ColorValue> {
             expr,
             rgb: entry.color(),
             alpha,
+            theme: true,
         });
     }
 
@@ -518,6 +541,7 @@ pub fn color(word: &str, theme: &Theme) -> Option<ColorValue> {
         expr: color3(c),
         rgb: Some(c),
         alpha,
+        theme: false,
     })
 }
 
@@ -864,6 +888,10 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
             )],
             "this child stretched across its line",
         )),
+        "appearance-none" => Some(utility(
+            Vec::new(),
+            "Silk drops the look a browser gives a control; nothing to set",
+        )),
         "absolute" | "relative" | "fixed" | "static" | "sticky" => Some(utility(
             Vec::new(),
             "positions are always absolute on Roblox; nothing to set",
@@ -911,12 +939,11 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
             vec![prop("ClipsDescendants", "false", Needs::Gui)],
             "children may draw outside the element",
         )),
-        "overflow-auto" | "overflow-scroll" | "overflow-y-auto" | "overflow-y-scroll" => {
-            Some(utility(
-                vec![prop("ScrollingEnabled", "true", Needs::Scrolling)],
-                "the frame scrolls",
-            ))
-        }
+        "overflow-auto" | "overflow-scroll" | "overflow-y-auto" | "overflow-y-scroll"
+        | "overflow-x-auto" | "overflow-x-scroll" => Some(utility(
+            vec![prop("ScrollingEnabled", "true", Needs::Scrolling)],
+            "the frame scrolls",
+        )),
         "scrollbar-none" => Some(utility(
             vec![prop("ScrollBarThickness", "0", Needs::Scrolling)],
             "no scroll bar",
@@ -1520,11 +1547,11 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
                 pieces.push(Piece::Stroke("Transparency", num(1.0 - c.alpha)));
             }
 
-            Some(Utility {
+            Some(c.utility(
                 pieces,
-                summary: format!("a UIStroke colored {}", color_words(&c)),
-                color: c.rgb.map(|rgb| (rgb, c.alpha)),
-            })
+                format!("a UIStroke colored {}", color_words(&c)),
+                c.alpha,
+            ))
         }
         "text-stroke" => {
             let c = color(rest, theme)?;
@@ -1533,11 +1560,11 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
                 prop("TextStrokeTransparency", num(1.0 - c.alpha), Needs::Text),
             ];
 
-            Some(Utility {
+            Some(c.utility(
                 pieces,
-                summary: format!("a text outline colored {}", color_words(&c)),
-                color: c.rgb.map(|rgb| (rgb, c.alpha)),
-            })
+                format!("a text outline colored {}", color_words(&c)),
+                c.alpha,
+            ))
         }
         "text-size" => {
             let n = arbitrary(rest)
@@ -1869,11 +1896,11 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
                 pieces.push(Piece::Stroke("Transparency", num(1.0 - c.alpha)));
             }
 
-            Some(Utility {
+            Some(c.utility(
                 pieces,
-                summary: format!("a UIStroke colored {}", color_words(&c)),
-                color: c.rgb.map(|rgb| (rgb, c.alpha)),
-            })
+                format!("a UIStroke colored {}", color_words(&c)),
+                c.alpha,
+            ))
         }
         "bg" => {
             if let Some(dir) = rest.strip_prefix("gradient-to-") {
@@ -1896,11 +1923,7 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
                 ));
             }
 
-            Some(Utility {
-                pieces,
-                summary: format!("background {}", color_words(&c)),
-                color: c.rgb.map(|rgb| (rgb, c.alpha)),
-            })
+            Some(c.utility(pieces, format!("background {}", color_words(&c)), c.alpha))
         }
         "from" | "via" | "to" => {
             let c = color(rest, theme)?;
@@ -1912,11 +1935,11 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
                 "to"
             };
 
-            Some(Utility {
-                pieces: vec![Piece::GradientStop(stop, c.expr.clone())],
-                summary: format!("gradient stop {}", color_words(&c)),
-                color: c.rgb.map(|rgb| (rgb, 1.0)),
-            })
+            Some(c.utility(
+                vec![Piece::GradientStop(stop, c.expr.clone())],
+                format!("gradient stop {}", color_words(&c)),
+                1.0,
+            ))
         }
         "text" => {
             if let Some(size) = text_size(rest) {
@@ -1933,20 +1956,16 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
                 pieces.push(prop("TextTransparency", num(1.0 - c.alpha), Needs::Text));
             }
 
-            Some(Utility {
-                pieces,
-                summary: format!("text {}", color_words(&c)),
-                color: c.rgb.map(|rgb| (rgb, c.alpha)),
-            })
+            Some(c.utility(pieces, format!("text {}", color_words(&c)), c.alpha))
         }
         "placeholder" => {
             let c = color(rest, theme)?;
 
-            Some(Utility {
-                pieces: vec![prop("PlaceholderColor3", c.expr.clone(), Needs::TextBox)],
-                summary: format!("placeholder {}", color_words(&c)),
-                color: c.rgb.map(|rgb| (rgb, 1.0)),
-            })
+            Some(c.utility(
+                vec![prop("PlaceholderColor3", c.expr.clone(), Needs::TextBox)],
+                format!("placeholder {}", color_words(&c)),
+                1.0,
+            ))
         }
         "image" => {
             if let Some(inner) = arbitrary(rest)
@@ -1967,11 +1986,7 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
                 pieces.push(prop("ImageTransparency", num(1.0 - c.alpha), Needs::Image));
             }
 
-            Some(Utility {
-                pieces,
-                summary: format!("image tint {}", color_words(&c)),
-                color: c.rgb.map(|rgb| (rgb, c.alpha)),
-            })
+            Some(c.utility(pieces, format!("image tint {}", color_words(&c)), c.alpha))
         }
         "font" => {
             if let Some(w) = weight(rest) {
@@ -2088,6 +2103,8 @@ pub struct Resolved {
     /// Whether a value of the theme file is in use, so the file needs
     /// the theme's prelude.
     pub uses_theme: bool,
+    /// The axes of `Size` the classes name, an automatic one at 0.
+    pub size: (Option<Dim>, Option<Dim>),
     /// Problems by class index.
     pub problems: Vec<(usize, Problem)>,
 }
@@ -2142,6 +2159,9 @@ pub fn resolve(element: Element, classes: &[Class], ctx: &Context) -> Resolved {
     let mut flex: BTreeMap<&'static str, String> = BTreeMap::new();
     let mut font: BTreeMap<&'static str, String> = BTreeMap::new();
     let mut state_fonts: BTreeMap<&'static str, BTreeMap<&'static str, String>> = BTreeMap::new();
+    // The child properties a state changes, by state and child class.
+    let mut state_children: BTreeMap<(&'static str, &'static str), BTreeMap<&'static str, String>> =
+        BTreeMap::new();
     let mut transition = None;
     let mut duration = None;
     let mut ease = None;
@@ -2180,9 +2200,29 @@ pub fn resolve(element: Element, classes: &[Class], ctx: &Context) -> Resolved {
                         }
                     }
 
+                    // The helper finds the child by its class and sets
+                    // the property there.
+                    Piece::Scale(n) => {
+                        state_children
+                            .entry((state, "UIScale"))
+                            .or_default()
+                            .insert("Scale", num(n));
+                    }
+
+                    Piece::Stroke(k, v) => {
+                        state_children
+                            .entry((state, "UIStroke"))
+                            .or_default()
+                            .insert(k, v);
+                    }
+
                     Piece::NoEffect(what) => out.problems.push((i, Problem::NoEffect(what))),
 
                     Piece::Theme => out.uses_theme = true,
+
+                    // One report for the class, not one for each side
+                    // of a padding.
+                    _ if out.problems.contains(&(i, Problem::VariantNeedsProperty)) => {}
 
                     _ => out.problems.push((i, Problem::VariantNeedsProperty)),
                 }
@@ -2255,12 +2295,15 @@ pub fn resolve(element: Element, classes: &[Class], ctx: &Context) -> Resolved {
         }
 
         // The pieces above skip a property the element lacks; a class
-        // that set nothing at all on this element says so.
+        // that set nothing at all on this element says so. The theme
+        // marker sets nothing of its own.
         if let Some(u) = parse(class, ctx)
             && !u.pieces.is_empty()
-            && u.pieces
-                .iter()
-                .all(|p| matches!(p, Piece::Prop { needs, .. } if !needs.met_by(element)))
+            && u.pieces.iter().all(|p| match p {
+                Piece::Prop { needs, .. } => !needs.met_by(element),
+
+                p => *p == Piece::Theme,
+            })
             && let Some(Piece::Prop { name, needs, .. }) = u.pieces.first()
         {
             out.problems
@@ -2289,10 +2332,18 @@ pub fn resolve(element: Element, classes: &[Class], ctx: &Context) -> Resolved {
 
     let gui = element.is_gui_object();
 
-    // Size, with the Roblox default on an axis no class named.
-    if gui && (size.0.is_some() || size.1.is_some()) {
-        let x = size.0.unwrap_or(Dim::px(100.0));
-        let y = size.1.unwrap_or(Dim::px(100.0));
+    // Size. An automatic axis grows from 0, so the content sets it. An
+    // axis no class names keeps the size of a new element, the Roblox
+    // 100 pixels; the transform takes it from a `Size` attribute.
+    let axes = (
+        size.0.or(auto.0.then_some(Dim::px(0.0))),
+        size.1.or(auto.1.then_some(Dim::px(0.0))),
+    );
+
+    if gui && (axes.0.is_some() || axes.1.is_some()) {
+        out.size = axes;
+        let x = axes.0.unwrap_or(Dim::px(100.0));
+        let y = axes.1.unwrap_or(Dim::px(100.0));
         out.props.push((
             "Size".into(),
             format!(
@@ -2535,6 +2586,30 @@ pub fn resolve(element: Element, classes: &[Class], ctx: &Context) -> Resolved {
         });
     }
 
+    // A state that changes a stroke or a scale needs the child at rest:
+    // a stroke of no width and a scale of 1, as in Tailwind.
+    for ((state, class), props) in &state_children {
+        match *class {
+            "UIStroke" if stroke.is_empty() => {
+                stroke.insert("Thickness", "0".into());
+            }
+
+            "UIScale" if scale.is_none() => scale = Some(1.0),
+
+            _ => {}
+        }
+
+        let fields = props
+            .iter()
+            .map(|(k, v)| format!("{k} = {v}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.states
+            .entry(state)
+            .or_default()
+            .push(((*class).to_string(), format!("{{ {fields} }}")));
+    }
+
     if gui && !stroke.is_empty() {
         let mut props: Vec<(String, String)> = stroke
             .iter()
@@ -2545,10 +2620,14 @@ pub fn resolve(element: Element, classes: &[Class], ctx: &Context) -> Resolved {
             props.push(("Thickness".to_string(), "1".to_string()));
         }
 
-        props.push((
-            "ApplyStrokeMode".to_string(),
-            "Enum.ApplyStrokeMode.Border".to_string(),
-        ));
+        // The border is the Tailwind reading. `stroke-contextual` asks
+        // for the outline of the text, so the default stays out.
+        if !stroke.contains_key("ApplyStrokeMode") {
+            props.push((
+                "ApplyStrokeMode".to_string(),
+                "Enum.ApplyStrokeMode.Border".to_string(),
+            ));
+        }
         out.children.push(Child {
             class: "UIStroke",
             props,
@@ -2922,6 +3001,9 @@ pub fn catalog(ctx: &Context) -> Vec<Entry> {
         "overflow-visible",
         "overflow-auto",
         "overflow-scroll",
+        "overflow-x-auto",
+        "overflow-y-auto",
+        "appearance-none",
         "scrollbar-none",
         "truncate",
         "text-clip",
@@ -3259,6 +3341,21 @@ mod tests {
         assert!(!takes_a_number("justify-c"));
     }
 
+    /// Silk reads `appearance-none` and the sideways overflow, so Enamel
+    /// knows them and reports no problem.
+    #[test]
+    fn the_classes_silk_reads_are_known() {
+        let r = resolved("TextButton", "appearance-none");
+        assert!(r.problems.is_empty() && r.props.is_empty(), "{r:?}");
+
+        let r = resolved("ScrollingFrame", "overflow-x-auto");
+        assert_eq!(
+            r.props,
+            [("ScrollingEnabled".to_string(), "true".to_string())]
+        );
+        assert!(r.problems.is_empty(), "{r:?}");
+    }
+
     #[test]
     fn a_transition_reads_its_time_and_easing() {
         let r = resolved("TextButton", "transition hover:bg-red-600");
@@ -3331,6 +3428,47 @@ mod tests {
                 .iter()
                 .any(|(_, v)| v.contains("GothamSSm") && v.contains("Bold"))
         );
+    }
+
+    /// A theme color on any utility, a gradient stop too, puts the
+    /// theme's prelude in the file: the color may name a local there.
+    #[test]
+    fn a_theme_color_marks_the_theme_as_used() {
+        let ctx = Context {
+            fonts: Fonts::default(),
+            theme: crate::theme::parse(
+                "local gold = Color3.fromRGB(255, 214, 92)\nexport const colors = { accent = gold }\n",
+            ),
+        };
+        let uses = |tag: &str, classes: &str| {
+            let cs: Vec<Class> = classes.split_whitespace().map(Class::parse).collect();
+            let r = resolve(Element::parse(tag).unwrap(), &cs, &ctx);
+
+            (r.uses_theme, r.problems)
+        };
+
+        for (tag, classes) in [
+            ("Frame", "bg-gradient-to-b from-accent to-orange-500"),
+            ("Frame", "via-accent"),
+            ("Frame", "to-accent"),
+            ("Frame", "bg-accent/50"),
+            ("Frame", "stroke-accent"),
+            ("Frame", "ring-accent"),
+            ("Frame", "hover:bg-accent"),
+            ("TextLabel", "text-accent"),
+            ("TextLabel", "text-stroke-accent"),
+            ("TextBox", "placeholder-accent"),
+            ("ImageLabel", "image-accent"),
+        ] {
+            assert_eq!(uses(tag, classes), (true, Vec::new()), "{classes}");
+        }
+
+        assert!(!uses("Frame", "bg-red-500 from-white").0);
+        // The marker does not hide a class the element lacks.
+        assert!(matches!(
+            &uses("Frame", "text-accent").1[..],
+            [(0, Problem::WrongElement(n, Needs::Text))] if n == "TextColor3"
+        ));
     }
 
     #[test]
@@ -3412,6 +3550,57 @@ mod tests {
         );
     }
 
+    /// A state changes a scale or a stroke through the child. With no
+    /// class at rest, the child starts at no width and a scale of 1.
+    #[test]
+    fn a_state_changes_a_scale_and_a_stroke() {
+        let r = resolved(
+            "TextButton",
+            "transition hover:scale-110 hover:stroke-yellow-400 hover:ring-4",
+        );
+
+        assert!(r.problems.is_empty(), "{:?}", r.problems);
+        assert_eq!(
+            r.states["hover"],
+            vec![
+                ("UIScale".to_string(), "{ Scale = 1.1 }".to_string()),
+                (
+                    "UIStroke".to_string(),
+                    "{ Color = Color3.fromRGB(250, 204, 21), Thickness = 4 }".to_string()
+                ),
+            ]
+        );
+        let child = |class: &str| {
+            r.children
+                .iter()
+                .find(|c| c.class == class)
+                .unwrap()
+                .props
+                .clone()
+        };
+        assert_eq!(child("UIScale"), [("Scale".to_string(), "1".to_string())]);
+        assert!(child("UIStroke").contains(&("Thickness".to_string(), "0".to_string())));
+
+        // A class at rest keeps its value.
+        let r = resolved("Frame", "scale-95 stroke-2 hover:scale-105 hover:stroke-4");
+        assert!(
+            r.children
+                .iter()
+                .any(|c| c.class == "UIScale" && c.props[0].1 == "0.95")
+        );
+        assert!(r.children.iter().any(|c| {
+            c.class == "UIStroke"
+                && c.props
+                    .contains(&("Thickness".to_string(), "2".to_string()))
+        }));
+
+        // A layout child cannot follow a state.
+        assert!(matches!(
+            resolved("Frame", "hover:p-4").problems[..],
+            [(0, Problem::VariantNeedsProperty)]
+        ));
+    }
+
     #[test]
     fn a_text_utility_on_a_frame_is_reported() {
         let r = resolved("Frame", "text-white");
@@ -3469,6 +3658,30 @@ mod tests {
         assert!(s.problems.is_empty(), "{:?}", s.problems);
     }
 
+    /// A UIStroke takes one `ApplyStrokeMode`: the class that names one,
+    /// else the border.
+    #[test]
+    fn a_stroke_mode_class_replaces_the_border_mode() {
+        let modes = |classes: &str| {
+            resolved("TextLabel", classes)
+                .children
+                .into_iter()
+                .find(|c| c.class == "UIStroke")
+                .unwrap()
+                .props
+                .into_iter()
+                .filter(|(k, _)| k == "ApplyStrokeMode")
+                .map(|(_, v)| v)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            modes("stroke-4 stroke-contextual"),
+            ["Enum.ApplyStrokeMode.Contextual"]
+        );
+        assert_eq!(modes("stroke-4"), ["Enum.ApplyStrokeMode.Border"]);
+    }
+
     #[test]
     fn brackets_take_any_value() {
         let r = resolved(
@@ -3518,6 +3731,39 @@ mod tests {
             t.props
                 .iter()
                 .any(|(k, v)| k == "FontFace" && v.contains("Montserrat.json"))
+        );
+    }
+
+    /// An automatic axis grows from 0, so the content sets it, as
+    /// Tailwind's `auto` does. An axis no class names stays at the size
+    /// of a new element.
+    #[test]
+    fn an_automatic_axis_starts_at_zero() {
+        let size = |classes: &str| {
+            let r = resolved("Frame", classes);
+            let get = |k: &str| r.props.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+
+            (get("Size"), get("AutomaticSize"))
+        };
+
+        assert_eq!(
+            size("w-auto h-10"),
+            (
+                Some("UDim2.new(0, 0, 0, 40)".into()),
+                Some("Enum.AutomaticSize.X".into())
+            )
+        );
+        assert_eq!(
+            size("h-auto"),
+            (
+                Some("UDim2.new(0, 100, 0, 0)".into()),
+                Some("Enum.AutomaticSize.Y".into())
+            )
+        );
+        assert_eq!(size("h-10").0, Some("UDim2.new(0, 100, 0, 40)".into()));
+        assert_eq!(
+            size("w-40 w-auto").0,
+            Some("UDim2.new(0, 160, 0, 100)".into())
         );
     }
 

@@ -3,10 +3,23 @@
 use alloy_ingot::{
     Color, ColorInfo, Completions, Edit, File, Finding, Handler, Hover, Settings, serve,
 };
-use silk::{css, editor, emit};
+use silk::{css, editor, emit, enamel};
 
 struct Silk {
     opts: emit::Options,
+    /// The project's `enamel.aly`, when the project loads Enamel.
+    theme_file: Option<std::path::PathBuf>,
+}
+
+impl Silk {
+    /// Reads the theme again, since the editor changes it between files.
+    fn refresh_theme(&mut self) {
+        if let Some(path) = &self.theme_file {
+            self.opts.theme = std::fs::read_to_string(path)
+                .map(|t| enamel::theme(&t))
+                .unwrap_or_default();
+        }
+    }
 }
 
 impl Handler for Silk {
@@ -22,6 +35,9 @@ impl Handler for Silk {
         self.opts.roblox = flag("roblox", true);
         self.opts.tags = flag("tags", true);
         self.opts.enamel = settings.ingots.iter().any(|n| n == "enamel");
+        self.theme_file = (self.opts.enamel && !settings.root.is_empty())
+            .then(|| std::path::Path::new(&settings.root).join("enamel.aly"));
+        self.opts.factory = emit::Factory::from_alx(&settings.alx);
 
         if let Some(h) = text("helper") {
             self.opts.helper = h;
@@ -52,6 +68,8 @@ impl Handler for Silk {
             return Ok(Vec::new());
         }
 
+        self.refresh_theme();
+
         Ok(emit::run(&file.source, &file.path, &self.opts).edits)
     }
 
@@ -59,6 +77,8 @@ impl Handler for Silk {
         if file.kind != "alx" {
             return Ok(Vec::new());
         }
+
+        self.refresh_theme();
 
         Ok(emit::run(&file.source, &file.path, &self.opts).findings)
     }
@@ -107,5 +127,6 @@ impl Handler for Silk {
 fn main() {
     serve(Silk {
         opts: emit::Options::default(),
+        theme_file: None,
     });
 }
