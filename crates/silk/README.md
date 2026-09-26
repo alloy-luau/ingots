@@ -73,6 +73,7 @@ reads it, so `--name` and `{` mean CSS there. The React form works too:
 | `hr` | a Frame one pixel high |
 | `progress`, `meter` | a bar with a fill for `value` of `max` |
 | `style` | a StyleLink to a StyleSheet |
+| `html`, `head`, `body`, `title`, `meta` | a ScreenGui, configured by its head, with a Frame that fills the screen; see [The document](#the-document) |
 
 A box that holds only text becomes a TextLabel. A `{ }` hole is not text:
 it may hold elements, as `{children}` does. So `<div>{name}</div>` stays
@@ -99,6 +100,63 @@ and the `no_effect` lint says that the class sets nothing.
 
 `select`, `iframe`, `svg`, `script`, a checkbox, and the other elements
 with no Roblox form are `unsupported_tag` errors.
+
+## The document
+
+A component can return a whole document. `<html>` is a ScreenGui.
+`<head>` makes no instance: its tags configure the ScreenGui. `<body>` is
+a Frame that fills the screen, and it takes classes and children as a
+`div` does.
+
+```alx
+export function App(props: { title: () -> string })
+    return <html>
+        <head>
+            <title>{props.title}</title>
+            <meta name="display-order" content="10" />
+            <meta name="ignore-inset" />
+            <meta name="reset-on-spawn" content="false" />
+            <meta name="viewport" content="width=1280, height=720, minimum-scale=0.5, maximum-scale=2" />
+            <style>
+                .panel { background-color: #101014; border-radius: 12px; }
+            </style>
+        </head>
+        <body>
+            <main className="panel">Welcome</main>
+        </body>
+    </html>
+end
+```
+
+| In the head | Roblox |
+| --- | --- |
+| `<title>` | the `Name` of the ScreenGui |
+| `<meta name="display-order" content="10" />` | `DisplayOrder` |
+| `<meta name="ignore-inset" />` | `ScreenInsets = None`; `content="false"` keeps `CoreUISafeInsets` |
+| `<meta name="reset-on-spawn" content="false" />` | `ResetOnSpawn` |
+| `<meta name="viewport" content="..." />` | the body in design pixels, scaled to the screen |
+| `<style>` | a StyleLink of the ScreenGui, so its rules reach the whole document |
+
+A meta with no `content` is on. A `{ }` value in `content` or in the
+title is a Luau value, so a source stays live: `content={order}`. For
+`ignore-inset`, such a value sets `IgnoreGuiInset`, which takes a
+boolean as it is. `<meta charset>` sets nothing, and another name
+reports `no_effect`. The ScreenGui stacks by `ZIndexBehavior.Sibling`,
+as CSS stacks `z-index` among siblings.
+
+The viewport takes the keys of HTML's viewport: `width` and `height` in
+design pixels, `minimum-scale` and `maximum-scale` (`min-scale` and
+`max-scale` also work), and `initial-scale` when there is no design
+size. A UIScale scales the body to the camera's `ViewportSize`. The
+scale is the smaller of the two ratios of the screen to the design size,
+clamped to the bounds. The body is the screen divided by that scale, so
+every size inside it reads in design pixels. `width=device-width,
+initial-scale=1` scales nothing. The UIScale is the body's child
+`viewport`, so code can read the scale from its `Scale`.
+
+The viewport needs the body as an instance. In the table form, the
+helper builds the body and fits it. In the element form, React gives
+the instance to the helper as a `ref`, through a spread.
 
 ## Attributes
 

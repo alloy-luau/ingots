@@ -166,6 +166,9 @@ struct Writer<'a> {
     uses_order: bool,
     uses_child: bool,
     uses_on: bool,
+    uses_viewport: bool,
+    /// The `<body>` of a document with a viewport, and its sizes.
+    viewports: HashMap<usize, Viewport>,
     reps: Vec<(usize, usize, String)>,
     ins: Vec<(usize, i64, usize, String)>,
     seq: usize,
@@ -229,6 +232,8 @@ impl<'a> Writer<'a> {
             uses_order: false,
             uses_child: false,
             uses_on: false,
+            uses_viewport: false,
+            viewports: HashMap::new(),
             reps: Vec::new(),
             ins: Vec::new(),
             seq: 0,
@@ -323,6 +328,10 @@ impl<'a> Writer<'a> {
 
         if self.uses_on {
             lead.push_str(&on_text(&self.opts.helper));
+        }
+
+        if self.uses_viewport {
+            lead.push_str(&viewport_text(&self.opts.helper));
         }
 
         if !lead.is_empty() {
@@ -446,9 +455,12 @@ impl<'a> Writer<'a> {
             .element_children(i)
             .filter(|k| !self.foldable[*k])
             .filter(|k| {
-                !self
-                    .tag(*k)
-                    .is_some_and(|t| matches!(t.kind, Kind::Style | Kind::Removed | Kind::Break))
+                !self.tag(*k).is_some_and(|t| {
+                    matches!(
+                        t.kind,
+                        Kind::Style | Kind::Removed | Kind::Break | Kind::Head | Kind::Meta
+                    )
+                })
             })
             .filter(|k| {
                 let name = &self.el(*k).name;
@@ -528,6 +540,16 @@ impl<'a> Writer<'a> {
             match tag.kind {
                 Kind::Style => self.style(i),
 
+                Kind::Document => self.document(i, tag),
+
+                Kind::Head | Kind::Meta => self.unsupported(
+                    i,
+                    &format!(
+                        "`<{}>` belongs in the `<head>` of an `<html>` document",
+                        tag.name
+                    ),
+                ),
+
                 Kind::Removed => {
                     if tag.name == "source" {
                         self.find(
@@ -606,6 +628,373 @@ impl<'a> Writer<'a> {
 
         if let Some((s, t)) = e.close {
             self.replace(s + 2, t - 1, "");
+        }
+    }
+
+    // ----------------------------------------------------------- document
+
+    /// `<html>` becomes a ScreenGui. Its `<head>` makes no instance: the
+    /// `<title>` and each `<meta>` set a property of the ScreenGui, and a
+    /// `<style>` there becomes a StyleLink of the ScreenGui, which styles
+    /// the whole document. The `<body>` is a box that fills the screen.
+    fn document(&mut self, i: usize, tag: &'static Tag) {
+        let e = self.el(i);
+        let src = self.src;
+        let mut props: Vec<(String, String)> = Vec::new();
+        let mut viewport: Option<Viewport> = None;
+        let mut name: Option<String> = None;
+
+        for h in self.m.element_children(i).collect::<Vec<_>>() {
+            let head = self.el(h);
+
+            if head.name != "head" {
+                continue;
+            }
+
+            self.covered[h] = true;
+
+            match head.close {
+                Some((s, t)) => {
+                    self.replace(head.start, head.open_end, "");
+                    self.replace(s, t, "");
+                }
+
+                None => self.replace(head.start, head.end, ""),
+            }
+
+            for c in head.children.clone() {
+                match c {
+                    Child::Text(s, t) => {
+                        if !src[s..t].trim().is_empty() {
+                            self.find("no_effect", (s, t), "text in the `<head>` shows nothing");
+                        }
+
+                        self.replace(s, t, "");
+                    }
+
+                    Child::Element(k) if matches!(self.el(k).name.as_str(), "title" | "meta") => {
+                        self.covered[k] = true;
+
+                        match self.el(k).name.as_str() {
+                            "title" => name = self.title(k),
+
+                            _ => self.meta(k, &mut props, &mut viewport),
+                        }
+
+                        let el = self.el(k);
+                        self.replace(el.start, el.end, "");
+                        self.cover_inside(k);
+                    }
+
+                    _ => {}
+                }
+            }
+        }
+
+        // A ScreenGui has no text: the space between the head and the body
+        // goes, and other text reports.
+        for c in e.children.clone() {
+            if let Child::Text(s, t) = c {
+                if !src[s..t].trim().is_empty() {
+                    self.find(
+                        "no_effect",
+                        (s, t),
+                        "a document shows text in its `<body>` alone",
+                    );
+                }
+
+                self.replace(s, t, "");
+            }
+        }
+
+        if let Some(vp) = viewport {
+            match self
+                .m
+                .element_children(i)
+                .find(|k| self.el(*k).name == "body")
+            {
+                Some(body) => {
+                    self.viewports.insert(body, vp);
+                }
+
+                None => self.find(
+                    "no_effect",
+                    e.name_span,
+                    "the viewport scales the `<body>`, and this document has none",
+                ),
+            }
+        }
+
+        // The attributes of `<html>`.
+        let mut written: HashSet<String> = HashSet::new();
+
+        for a in &e.attrs {
+            let raw = match a.value {
+                Value::Bare => Raw::Bare,
+
+                Value::Str(s, t) => Raw::Str(&src[s..t]),
+
+                Value::Expr(s, t) => Raw::Expr(&src[s..t]),
+            };
+
+            match html::map(tag, &a.name, raw, None, &self.opts.helper) {
+                Mapped::Keep => {
+                    if a.name.chars().next().is_some_and(char::is_uppercase) {
+                        written.insert(a.name.clone());
+                    }
+                }
+
+                Mapped::Props(list) => {
+                    let text = list
+                        .iter()
+                        .map(|(k, v)| format!("{k}={{{v}}}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    self.uses_not |= text.contains(&format!("{}_not(", self.opts.helper));
+                    self.replace(a.span.0, a.span.1, text);
+
+                    for (k, _) in list {
+                        written.insert(k.to_string());
+                    }
+                }
+
+                Mapped::Read if a.name == "id" && name.is_none() => {
+                    self.replace(a.name_span.0, a.name_span.1, "Name");
+                    written.insert("Name".into());
+                }
+
+                Mapped::Read
+                    if matches!(a.name.as_str(), "className" | "class")
+                        && self.opts.enamel
+                        && matches!(a.value, Value::Str(..)) =>
+                {
+                    // Enamel's classes for a ScreenGui: `sibling-z`, `display-3`.
+                    self.replace(a.name_span.0, a.name_span.1, "ClassName");
+                }
+
+                Mapped::Drop => self.remove_attr(a.span),
+
+                Mapped::Unknown => {
+                    self.find(
+                        "unknown_attribute",
+                        a.name_span,
+                        format!(
+                            "Silk does not know `{}` on `<html>`; it sets nothing",
+                            a.name
+                        ),
+                    );
+                    self.remove_attr(a.span);
+                }
+
+                _ => {
+                    self.find(
+                        "no_effect",
+                        a.name_span,
+                        format!(
+                            "`{}` sets nothing on a ScreenGui; put it on the `<body>`",
+                            a.name
+                        ),
+                    );
+                    self.remove_attr(a.span);
+                }
+            }
+        }
+
+        let replaced = match self.opts.enamel {
+            true => crate::enamel::sets(
+                e.text(src, "className")
+                    .or(e.text(src, "class"))
+                    .unwrap_or("")
+                    .split_whitespace(),
+                &self.opts.theme,
+            ),
+
+            false => HashSet::new(),
+        };
+        let mut generated = vec![
+            (
+                "Name".to_string(),
+                name.unwrap_or_else(|| "\"html\"".into()),
+            ),
+            // CSS stacks by `z-index` among siblings.
+            (
+                "ZIndexBehavior".to_string(),
+                "Enum.ZIndexBehavior.Sibling".to_string(),
+            ),
+        ];
+        generated.extend(props);
+        generated.retain(|(k, _)| !written.contains(k) && !replaced.contains(k));
+
+        let attrs: String = generated
+            .iter()
+            .map(|(k, v)| format!(" {k}={{{v}}}"))
+            .collect();
+        self.replace(e.name_span.0, e.name_span.1, format!("ScreenGui{attrs}"));
+
+        if let Some((s, _)) = e.close {
+            self.replace(s + 2, s + 2 + e.name.len(), "ScreenGui");
+        }
+    }
+
+    /// The `Name` a `<title>` gives: its text, its one hole, or both as
+    /// an interpolated string.
+    fn title(&self, k: usize) -> Option<String> {
+        let e = self.el(k);
+        let mut text = String::new();
+        let mut holes = 0;
+
+        for c in &e.children {
+            match c {
+                Child::Text(s, t) => {
+                    let mut run = self.src[*s..*t].to_string();
+
+                    // A `Name` is no RichText, so `&amp;` decodes here too.
+                    let rich = [
+                        ("lt", "<"),
+                        ("gt", ">"),
+                        ("quot", "\""),
+                        ("apos", "'"),
+                        ("amp", "&"),
+                    ];
+
+                    for (name, ch) in html::ENTITIES.iter().chain(&rich) {
+                        run = run.replace(&format!("&{name};"), ch);
+                    }
+
+                    text.push_str(&run.replace('`', "\\`"));
+                }
+
+                Child::Hole(s, t) => {
+                    holes += 1;
+                    text.push_str(&self.src[*s..*t]);
+                }
+
+                _ => {}
+            }
+        }
+
+        let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        match holes {
+            _ if words.is_empty() => None,
+
+            0 => Some(luau_string(&words.replace("\\`", "`"))),
+
+            1 if words.starts_with('{') && words.ends_with('}') && !words[1..].contains('{') => {
+                Some(words[1..words.len() - 1].trim().to_string())
+            }
+
+            _ => Some(format!("`{words}`")),
+        }
+    }
+
+    /// The property one `<meta>` sets, or the viewport it asks for.
+    fn meta(&mut self, k: usize, props: &mut Vec<(String, String)>, vp: &mut Option<Viewport>) {
+        let e = self.el(k);
+        let src = self.src;
+        let span = e.name_span;
+        let content = e.attr("content").map(|a| a.value);
+        let text = e.text(src, "content").map(str::trim);
+        let expr = match content {
+            Some(Value::Expr(s, t)) => Some(src[s..t].trim().to_string()),
+
+            _ => None,
+        };
+        let Some(name) = e.text(src, "name").map(str::to_ascii_lowercase) else {
+            if e.attr("charset").is_none() && e.attr("http-equiv").is_none() {
+                self.find(
+                    "bad_value",
+                    span,
+                    "a `<meta>` sets nothing without a `name`",
+                );
+            }
+
+            return;
+        };
+        // A flag is on with no content, as `<meta name="ignore-inset">`.
+        let flag = |text: Option<&str>| match text.map(str::to_ascii_lowercase).as_deref() {
+            None | Some("" | "true" | "yes" | "on" | "1") => Some(true),
+
+            Some("false" | "no" | "off" | "0") => Some(false),
+
+            _ => None,
+        };
+
+        match name.as_str() {
+            "display-order" => match (text.map(str::parse::<i64>), expr) {
+                (Some(Ok(n)), _) => props.push(("DisplayOrder".into(), n.to_string())),
+
+                (_, Some(x)) => props.push(("DisplayOrder".into(), x)),
+
+                _ => self.find(
+                    "bad_value",
+                    span,
+                    "`display-order` takes a whole number: `content=\"10\"`",
+                ),
+            },
+
+            "reset-on-spawn" | "ignore-inset" => {
+                let value = match (&expr, flag(text)) {
+                    (Some(x), _) => Some(Err(x.clone())),
+
+                    (None, Some(on)) => Some(Ok(on)),
+
+                    (None, None) => None,
+                };
+
+                match (name.as_str(), value) {
+                    (_, None) => self.find(
+                        "bad_value",
+                        span,
+                        format!("`{name}` takes `true` or `false`"),
+                    ),
+
+                    ("reset-on-spawn", Some(v)) => props.push((
+                        "ResetOnSpawn".into(),
+                        v.map_or_else(|x| x, |on| on.to_string()),
+                    )),
+
+                    // `ScreenInsets` is the modern property. A source goes to
+                    // `IgnoreGuiInset`, which takes a boolean as it is.
+                    (_, Some(Ok(on))) => props.push((
+                        "ScreenInsets".into(),
+                        match on {
+                            true => "Enum.ScreenInsets.None",
+
+                            false => "Enum.ScreenInsets.CoreUISafeInsets",
+                        }
+                        .into(),
+                    )),
+
+                    (_, Some(Err(x))) => props.push(("IgnoreGuiInset".into(), x)),
+                }
+            }
+
+            "viewport" => match (text, expr) {
+                (Some(t), _) => {
+                    let (v, problems) = Viewport::parse(t);
+
+                    for p in problems {
+                        self.find("bad_value", span, p);
+                    }
+
+                    *vp = v;
+                }
+
+                _ => self.find(
+                    "dynamic_style",
+                    span,
+                    "Silk reads the viewport when it compiles; write `content` as text",
+                ),
+            },
+
+            other => self.find(
+                "no_effect",
+                span,
+                format!(
+                    "`{other}` sets nothing on a ScreenGui; Silk reads `display-order`, `ignore-inset`, `reset-on-spawn`, and `viewport`"
+                ),
+            ),
         }
     }
 
@@ -1862,6 +2251,12 @@ impl<'a> Writer<'a> {
             None
         };
 
+        // The viewport scales the body about the middle of the screen.
+        if self.viewports.contains_key(&i) {
+            m.set("AnchorPoint", "Vector2.new(0.5, 0.5)");
+            m.set("Position", "UDim2.fromScale(0.5, 0.5)");
+        }
+
         // ---- write the element
         let mut generated: Vec<(String, String)> = extra;
         generated.extend(m.props.iter().cloned());
@@ -1869,10 +2264,22 @@ impl<'a> Writer<'a> {
         let mut seen = HashSet::new();
         generated.retain(|(k, _)| seen.insert(k.clone()));
 
-        let attrs: String = generated
+        let mut attrs: String = generated
             .iter()
             .map(|(k, v)| format!(" {k}={{{v}}}"))
             .collect();
+
+        // In the element form the body is an element and not an instance,
+        // so React hands the instance to the viewport helper as a `ref`.
+        if let Some(vp) = self.viewports.get(&i).filter(|_| !self.opts.factory.table) {
+            self.uses_viewport = true;
+            attrs.push_str(&format!(
+                " {{{{ ref = {}_viewport({}) }}}}",
+                self.opts.helper,
+                vp.args()
+            ));
+        }
+
         // Vide's factory has no VideoFrame and no Sound either.
         let (open_tag, close_tag) =
             match self.opts.factory.table && matches!(class, "VideoFrame" | "Sound") {
@@ -1934,38 +2341,54 @@ impl<'a> Writer<'a> {
         }
 
         let tags = tags.filter(|_| self.opts.tags);
+        let tagged = tags.is_some() || href.is_some() || change.is_some() || limit.is_some();
+        let viewport = self
+            .viewports
+            .get(&i)
+            .cloned()
+            .filter(|_| self.opts.factory.table);
 
-        if tags.is_some() || href.is_some() || change.is_some() || limit.is_some() {
-            self.uses_helper = true;
+        if tagged || viewport.is_some() {
             let (open, close) = self.hole_braces(i);
             let nil = || "nil".to_string();
-            // A change handler and a limit ride after the tags and the link.
-            let input = match (&change, &limit) {
-                (None, None) => String::new(),
+            let mut pre = open.to_string();
+            let mut post = String::new();
 
-                _ => format!(
-                    ", {}, {}",
-                    change.clone().unwrap_or_else(nil),
-                    limit.clone().unwrap_or_else(nil)
-                ),
-            };
             // The element builds inside a function the helper calls once:
             // the markup compiler reads markup outside a function in a
             // child as a condition that never updates.
-            self.insert(
-                e.start,
-                RANK_WRAP_OPEN,
-                format!("{open}{}(function() return ", self.opts.helper),
-            );
-            self.insert(
-                e.end,
-                RANK_WRAP_CLOSE,
-                format!(
-                    " end, {}, {}{input}){close}",
+            if let Some(vp) = viewport {
+                self.uses_viewport = true;
+                pre.push_str(&format!(
+                    "{}_viewport({}, function() return ",
+                    self.opts.helper,
+                    vp.args()
+                ));
+                post = " end)".into();
+            }
+
+            if tagged {
+                self.uses_helper = true;
+                // A change handler and a limit ride after the tags and the link.
+                let input = match (&change, &limit) {
+                    (None, None) => String::new(),
+
+                    _ => format!(
+                        ", {}, {}",
+                        change.clone().unwrap_or_else(nil),
+                        limit.clone().unwrap_or_else(nil)
+                    ),
+                };
+                pre.push_str(&format!("{}(function() return ", self.opts.helper));
+                post = format!(
+                    " end, {}, {}{input}){post}",
                     tags.unwrap_or_else(nil),
                     href.unwrap_or_else(nil)
-                ),
-            );
+                );
+            }
+
+            self.insert(e.start, RANK_WRAP_OPEN, pre);
+            self.insert(e.end, RANK_WRAP_CLOSE, format!("{post}{close}"));
         }
     }
 
@@ -2622,6 +3045,87 @@ impl<'a> Writer<'a> {
     }
 }
 
+/// What `<meta name="viewport">` asks for: the body laid out at a design
+/// size and scaled to the screen, as HTML's viewport scales a page.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Viewport {
+    /// The design size in pixels; `device-width` leaves it unset.
+    pub width: Option<f64>,
+    pub height: Option<f64>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    /// The scale with no design size: `initial-scale`.
+    pub initial: Option<f64>,
+}
+
+impl Viewport {
+    /// Reads `width=1280, height=720, minimum-scale=0.5, maximum-scale=2`.
+    /// Returns `None` when nothing scales, as for `width=device-width,
+    /// initial-scale=1`, and the problems of the text.
+    pub fn parse(content: &str) -> (Option<Self>, Vec<String>) {
+        let mut v = Self::default();
+        let mut problems = Vec::new();
+
+        for part in content.split([',', ';']) {
+            let Some((key, value)) = part.split_once('=') else {
+                if !part.trim().is_empty() {
+                    problems.push(format!("`{}` is not a `key=value` pair", part.trim()));
+                }
+
+                continue;
+            };
+            let key = key.trim().to_ascii_lowercase();
+            let value = value.trim();
+            let number = value.trim_end_matches("px").parse::<f64>().ok();
+            let slot = match key.as_str() {
+                "width" if value == "device-width" => continue,
+
+                "height" if value == "device-height" => continue,
+
+                "width" => &mut v.width,
+
+                "height" => &mut v.height,
+
+                "minimum-scale" | "min-scale" => &mut v.min,
+
+                "maximum-scale" | "max-scale" => &mut v.max,
+
+                "initial-scale" => &mut v.initial,
+
+                // A player cannot zoom a Roblox UI.
+                "user-scalable" | "interactive-widget" | "viewport-fit" => continue,
+
+                _ => {
+                    problems.push(format!(
+                        "`{key}` is not a viewport key Silk reads: `width`, `height`, `minimum-scale`, `maximum-scale`, `initial-scale`"
+                    ));
+
+                    continue;
+                }
+            };
+
+            match number.filter(|n| *n > 0.0) {
+                Some(n) => *slot = Some(n),
+
+                None => problems.push(format!("`{key}` takes a number above 0, not `{value}`")),
+            }
+        }
+
+        let scales = v.width.is_some() || v.height.is_some() || v.initial.is_some_and(|s| s != 1.0);
+
+        (scales.then_some(v), problems)
+    }
+
+    /// The arguments of the viewport helper.
+    fn args(&self) -> String {
+        [self.width, self.height, self.min, self.max, self.initial]
+            .iter()
+            .map(|n| n.map_or("nil".to_string(), css::num))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 /// The Roblox selector for a CSS one, or why it has none.
 pub fn roblox_selector(sel: &Selector, drop_placeholder: bool) -> Result<String, String> {
     let mut out = String::new();
@@ -2917,6 +3421,39 @@ pub fn on_text(helper: &str) -> String {
     format!(
         "local function {helper}_on(f: any): any if f == nil then return nil end \
 local h: any = f return function(...) h(...) end end "
+    )
+}
+
+/// The viewport helper as one line of Alloy. It scales the body by the
+/// camera's `ViewportSize` over the design size, clamped to the bounds,
+/// with a UIScale, and sizes the body to the screen over that scale, so
+/// inside it every size reads in design pixels. With `make`, it builds
+/// the body and fits it, as the table form takes it. Without, it returns
+/// the function that fits one, which React calls as a `ref` with the
+/// instance, and with nil when the body goes.
+// ponytail: it reads the camera that is current when the body mounts. A
+// script that swaps `workspace.CurrentCamera` later leaves the scale on
+// the old one; watch `CurrentCamera` if a game does that.
+pub fn viewport_text(helper: &str) -> String {
+    format!(
+        "local function {helper}_viewport(w: number?, h: number?, lo: number?, hi: number?, base: number?, make: any): any \
+local con: RBXScriptConnection? = nil \
+local function fit(value: any): any \
+if con ~= nil then con:Disconnect() con = nil end \
+if typeof(value) ~= \"Instance\" then return value end \
+local el: any = value \
+local scale: any = el:FindFirstChild(\"viewport\") \
+if scale == nil then scale = Instance.new(\"UIScale\") scale.Name = \"viewport\" scale.Parent = el end \
+local camera = game:GetService(\"Workspace\").CurrentCamera \
+local function resize() local s = base or 1 \
+if camera ~= nil and (w ~= nil or h ~= nil) then local size = camera.ViewportSize s = math.min(if w ~= nil then size.X / w else math.huge, if h ~= nil then size.Y / h else math.huge) end \
+s = math.clamp(s, lo or 0, hi or math.huge) if s <= 0 or s == math.huge then s = 1 end \
+scale.Scale = s el.Size = UDim2.fromScale(1 / s, 1 / s) end \
+resize() \
+if camera ~= nil then local c = camera:GetPropertyChangedSignal(\"ViewportSize\"):Connect(resize) con = c el.Destroying:Connect(function() c:Disconnect() end) end \
+return el end \
+if make ~= nil then local build: any = make return fit(build()) end \
+return fit end "
     )
 }
 
@@ -3771,6 +4308,186 @@ mod tests {
             .count();
 
         assert_eq!(voids, 1, "only the `<br>` outside the comment");
+    }
+
+    const DOCUMENT: &str = "return <html lang=\"en\">\n  <head>\n    <meta charset=\"utf-8\" />\n    <title>Menu &amp; more</title>\n    <meta name=\"display-order\" content=\"10\" />\n    <meta name=\"ignore-inset\" />\n    <meta name=\"reset-on-spawn\" content=\"false\" />\n    <meta name=\"viewport\" content=\"width=1280, height=720, minimum-scale=0.5, maximum-scale=2\" />\n    <style>.card { color: red }</style>\n  </head>\n  <body>\n    <p>Hi</p>\n  </body>\n</html>\n";
+
+    /// `<html>` is a ScreenGui that the head configures: the title names
+    /// it, each meta sets a property, and the style links to it.
+    #[test]
+    fn a_document_makes_a_screen_gui() {
+        let out = silk(DOCUMENT);
+
+        assert!(
+            out.contains("<ScreenGui Name={\"Menu & more\"} ZIndexBehavior={Enum.ZIndexBehavior.Sibling} DisplayOrder={10} ScreenInsets={Enum.ScreenInsets.None} ResetOnSpawn={false}>"),
+            "{out}"
+        );
+        assert!(out.contains("</ScreenGui>"), "{out}");
+        assert!(
+            out.contains("<StyleLink StyleSheet={__silk_sheet("),
+            "{out}"
+        );
+        assert!(
+            !out.contains("<head") && !out.contains("<meta") && !out.contains("<title"),
+            "{out}"
+        );
+        assert!(!out.contains("lang") && !out.contains("charset"), "{out}");
+        // React's body takes the viewport as a `ref`.
+        assert!(
+            out.contains("<Frame Name={\"body\"}") && out.contains("Size={UDim2.fromScale(1, 1)}"),
+            "{out}"
+        );
+        assert!(
+            out.contains("AnchorPoint={Vector2.new(0.5, 0.5)} Position={UDim2.fromScale(0.5, 0.5)} {{ ref = __silk_viewport(1280, 720, 0.5, 2, nil) }}>"),
+            "{out}"
+        );
+        assert!(
+            out.contains("local function __silk_viewport(w: number?, h: number?, lo: number?"),
+            "{out}"
+        );
+
+        let findings: Vec<String> = run(DOCUMENT, "a.alx", &Options::default())
+            .findings
+            .into_iter()
+            .map(|f| f.lint)
+            .collect();
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    /// The document compiles under each factory: the table form builds
+    /// the body inside the viewport helper, and the element form hands it
+    /// the instance as a `ref`.
+    #[test]
+    fn a_document_takes_each_factory() {
+        let table = |create: &str, compute: Option<(&str, &str)>| Options {
+            factory: Factory {
+                table: true,
+                create: Some(create.into()),
+                compute: compute.map(|(c, u)| (c.into(), u.into())),
+            },
+            ..Options::default()
+        };
+        let vide = table("vide.create", None);
+        let fusion = table("New", Some(("computed", "use")));
+        let react = Options {
+            factory: Factory {
+                table: false,
+                create: Some("React.createElement".into()),
+                compute: None,
+            },
+            ..Options::default()
+        };
+
+        for opts in [&vide, &fusion] {
+            let out = apply(DOCUMENT, &run(DOCUMENT, "a.alx", opts).edits);
+
+            assert!(
+                out.contains("{__silk_viewport(1280, 720, 0.5, 2, nil, function() return <Frame Name={\"body\"}"),
+                "{out}"
+            );
+            assert!(out.contains("</Frame> end)}"), "{out}");
+            assert!(!out.contains("ref ="), "{out}");
+            assert!(
+                out.contains("<__silk_child Class=\"StyleLink\" StyleSheet="),
+                "{out}"
+            );
+            assert!(out.contains("<ScreenGui Name={\"Menu & more\"}"), "{out}");
+        }
+
+        let out = apply(DOCUMENT, &run(DOCUMENT, "a.alx", &react).edits);
+        assert!(
+            out.contains("{{ ref = __silk_viewport(1280, 720, 0.5, 2, nil) }}"),
+            "{out}"
+        );
+        assert!(out.contains("<StyleLink StyleSheet="), "{out}");
+
+        // A source reaches each property as it is.
+        let src = "return <html><head><title>{name}</title><meta name=\"display-order\" content={order} /><meta name=\"ignore-inset\" content={full} /><meta name=\"reset-on-spawn\" /></head><body>{children}</body></html>\n";
+
+        for opts in [&vide, &fusion, &react] {
+            let out = apply(src, &run(src, "a.alx", opts).edits);
+
+            assert!(
+                out.contains("<ScreenGui Name={name} ZIndexBehavior={Enum.ZIndexBehavior.Sibling} DisplayOrder={order} IgnoreGuiInset={full} ResetOnSpawn={true}>"),
+                "{out}"
+            );
+            assert!(!out.contains("viewport"), "{out}");
+        }
+    }
+
+    #[test]
+    fn the_viewport_reads_the_html_keys() {
+        let (v, problems) = Viewport::parse(
+            "width=1280px; height=720, min-scale=0.5, maximum-scale=2, user-scalable=no",
+        );
+        assert_eq!(
+            v,
+            Some(Viewport {
+                width: Some(1280.0),
+                height: Some(720.0),
+                min: Some(0.5),
+                max: Some(2.0),
+                initial: None,
+            })
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+
+        // HTML's usual line scales nothing.
+        assert_eq!(
+            Viewport::parse("width=device-width, initial-scale=1"),
+            (None, Vec::new())
+        );
+
+        let (_, problems) = Viewport::parse("width=wide, zoom=2");
+        assert_eq!(problems.len(), 2, "{problems:?}");
+    }
+
+    /// The viewport helper runs under `luau` against the mock camera of
+    /// `tests/viewport.luau`. A machine without `luau` skips the run.
+    #[test]
+    fn the_viewport_helper_runs_against_a_mock() {
+        let script = format!(
+            "{}\n{}",
+            viewport_text("__silk"),
+            include_str!("../tests/viewport.luau")
+        );
+        let path = std::env::temp_dir().join(format!("silk-viewport-{}.luau", std::process::id()));
+        std::fs::write(&path, script).unwrap();
+        let run = std::process::Command::new("luau").arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        let Ok(out) = run else {
+            eprintln!("no luau on PATH: the helper run is skipped");
+
+            return;
+        };
+
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn a_head_tag_outside_a_document_reports() {
+        let out = run(
+            "return <div><meta name=\"viewport\" content=\"width=1\" /><title>x</title></div>\n",
+            "a.alx",
+            &Options::default(),
+        );
+        let unsupported = out
+            .findings
+            .iter()
+            .filter(|f| f.lint == "unsupported_tag")
+            .count();
+
+        assert_eq!(unsupported, 2, "{:?}", out.findings);
+
+        let lints = lints(
+            "return <html><head><meta name=\"theme-color\" content=\"#fff\" /><meta name=\"viewport\" content=\"width=10\" /></head></html>\n",
+        );
+        assert!(lints.contains(&"no_effect".to_string()), "{lints:?}");
     }
 
     #[test]

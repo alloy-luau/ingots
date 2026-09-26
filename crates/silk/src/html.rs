@@ -33,6 +33,12 @@ pub enum Kind {
     /// `thead`, `tbody`, `tfoot`: a fragment, so the rows reach the table.
     Group,
     Style,
+    /// `html`: the document, a ScreenGui.
+    Document,
+    /// `head`: no instance. What it holds configures the document.
+    Head,
+    /// `title` and `meta` in the head: a property of the ScreenGui.
+    Meta,
     /// `col`, `colgroup`, `source`, `track`: no instance.
     Removed,
     /// No Roblox form.
@@ -160,16 +166,16 @@ pub const TAGS: &[Tag] = &[
     t("h6", Text, "A heading, 11 px and bold."),
     t(
         "head",
-        Unsupported,
-        "The document head. A Roblox UI has no document.",
+        Head,
+        "The document head: no instance. `<title>` names the ScreenGui, a `<meta>` sets one of its properties, and a `<style>` styles the whole document.",
     ),
     t("header", Block, "The header of a section."),
     t("hgroup", Block, "A heading and its subheadings."),
     t("hr", Rule, "A horizontal rule: a Frame one pixel high."),
     t(
         "html",
-        Unsupported,
-        "The document root. A Roblox UI has no document; start from `body` or `div`.",
+        Document,
+        "The document: a ScreenGui. `<head>` configures it, and `<body>` is its root Frame.",
     ),
     t("i", Inline, "Text in italics."),
     t(
@@ -207,8 +213,8 @@ pub const TAGS: &[Tag] = &[
     t("menu", Block, "A list of commands."),
     t(
         "meta",
-        Unsupported,
-        "Document metadata. A Roblox UI has no document.",
+        Meta,
+        "Document metadata in the `<head>`: `display-order`, `ignore-inset`, `reset-on-spawn`, and `viewport` set the ScreenGui.",
     ),
     t(
         "meter",
@@ -315,8 +321,8 @@ pub const TAGS: &[Tag] = &[
     t("time", Inline, "A date or a time."),
     t(
         "title",
-        Unsupported,
-        "The document title. A Roblox UI has no document.",
+        Meta,
+        "The document title in the `<head>`: the ScreenGui's `Name`.",
     ),
     t("tr", Row, "A table row."),
     t("track", Removed, "A text track of a media element."),
@@ -369,7 +375,9 @@ pub fn class_of(tag: &Tag, input_type: Option<&str>) -> Option<&'static str> {
 
         Canvas => "CanvasGroup",
 
-        Break | Group | Style | Removed | Unsupported => return None,
+        Document => "ScreenGui",
+
+        Break | Group | Style | Head | Meta | Removed | Unsupported => return None,
     })
 }
 
@@ -833,6 +841,17 @@ pub fn attributes(tag: &Tag, input_type: Option<&str>) -> Vec<(&'static str, &'s
 
         Block if tag.name == "dialog" => &[("open", "`Visible`")],
 
+        Document => &[("lang", "nothing: Roblox localizes by its own tables")],
+
+        Meta if tag.name == "meta" => &[
+            (
+                "name",
+                "`display-order`, `ignore-inset`, `reset-on-spawn`, or `viewport`",
+            ),
+            ("content", "the value the name sets"),
+            ("charset", "nothing: the text is UTF-8"),
+        ],
+
         Cell => &[
             ("colSpan", "nothing: a UITableLayout has no spans"),
             ("rowSpan", "nothing: a UITableLayout has no spans"),
@@ -896,6 +915,14 @@ pub fn map(tag: &Tag, name: &str, value: Raw, input_type: Option<&str>, helper: 
         (Link, "target" | "rel" | "download" | "hreflang" | "referrerpolicy") => Mapped::Drop,
 
         (Input, "type") => Mapped::Read,
+
+        (Meta, "name" | "content") => Mapped::Read,
+
+        (Meta, "charset" | "http-equiv" | "property" | "media") => Mapped::Drop,
+
+        (Document, "hidden") => Mapped::Props(vec![("Enabled", value.not(helper))]),
+
+        (Document, "xmlns" | "manifest" | "prefix") => Mapped::Drop,
 
         (_, "hidden") => Mapped::Props(vec![("Visible", value.not(helper))]),
 
