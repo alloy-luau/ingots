@@ -4128,32 +4128,46 @@ local h: any = f return function(...) h(...) end end "
 }
 
 /// The viewport helper as one line of Alloy. It scales the body by the
-/// camera's `ViewportSize` over the design size, clamped to the bounds,
-/// with a UIScale, and sizes the body to the screen over that scale, so
-/// inside it every size reads in design pixels. With `make`, it builds
-/// the body and fits it, as the table form takes it. Without, it returns
-/// the function that fits one, which React calls as a `ref` with the
-/// instance, and with nil when the body goes.
+/// size of the ScreenGui that holds it over the design size, clamped to
+/// the bounds, with a UIScale, and sizes the body to the screen over that
+/// scale, so inside it every size reads in design pixels. The size of
+/// the ScreenGui leaves out the top bar when the document keeps the
+/// insets. Before the ScreenGui has a size, the camera's `ViewportSize`
+/// stands in. With `make`, it builds the body and fits it, as the table
+/// form takes it. Without, it returns the function that fits one, which
+/// React calls as a `ref` with the instance, and with nil when the body
+/// goes.
 // ponytail: it reads the camera that is current when the body mounts. A
-// script that swaps `workspace.CurrentCamera` later leaves the scale on
-// the old one; watch `CurrentCamera` if a game does that.
+// script that swaps `workspace.CurrentCamera` later leaves the stand-in
+// on the old one; watch `CurrentCamera` if a game does that.
 pub fn viewport_text(helper: &str) -> String {
     format!(
         "local function {helper}_viewport(w: number?, h: number?, lo: number?, hi: number?, base: number?, make: any): any \
-local con: RBXScriptConnection? = nil \
+local cons: {{ any }} = {{}} \
+local function drop() for _, c in cons do c:Disconnect() end table.clear(cons) end \
 local function fit(value: any): any \
-if con ~= nil then con:Disconnect() con = nil end \
+drop() \
 if typeof(value) ~= \"Instance\" then return value end \
 local el: any = value \
 local scale: any = el:FindFirstChild(\"viewport\") \
 if scale == nil then scale = Instance.new(\"UIScale\") scale.Name = \"viewport\" scale.Parent = el end \
 local camera = game:GetService(\"Workspace\").CurrentCamera \
+local gui: any = nil \
 local function resize() local s = base or 1 \
-if camera ~= nil and (w ~= nil or h ~= nil) then local size = camera.ViewportSize s = math.min(if w ~= nil then size.X / w else math.huge, if h ~= nil then size.Y / h else math.huge) end \
+local size: any = if gui ~= nil and gui.AbsoluteSize.X > 0 and gui.AbsoluteSize.Y > 0 then gui.AbsoluteSize elseif camera ~= nil then camera.ViewportSize else nil \
+if size ~= nil and (w ~= nil or h ~= nil) then s = math.min(if w ~= nil then size.X / w else math.huge, if h ~= nil then size.Y / h else math.huge) end \
 s = math.clamp(s, lo or 0, hi or math.huge) if s <= 0 or s == math.huge then s = 1 end \
 scale.Scale = s el.Size = UDim2.fromScale(1 / s, 1 / s) end \
-resize() \
-if camera ~= nil then local c = camera:GetPropertyChangedSignal(\"ViewportSize\"):Connect(resize) con = c el.Destroying:Connect(function() c:Disconnect() end) end \
+local watch: any = nil \
+local function follow() if watch ~= nil then watch:Disconnect() end \
+gui = el:FindFirstAncestorWhichIsA(\"LayerCollector\") \
+watch = if gui ~= nil then gui:GetPropertyChangedSignal(\"AbsoluteSize\"):Connect(resize) else nil \
+resize() end \
+follow() \
+table.insert(cons, {{ Disconnect = function() if watch ~= nil then watch:Disconnect() end end }}) \
+table.insert(cons, (el.AncestryChanged:Connect(follow))) \
+if camera ~= nil then table.insert(cons, camera:GetPropertyChangedSignal(\"ViewportSize\"):Connect(resize)) end \
+table.insert(cons, (el.Destroying:Connect(drop))) \
 return el end \
 if make ~= nil then local build: any = make return fit(build()) end \
 return fit end "

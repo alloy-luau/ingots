@@ -202,10 +202,13 @@ as CSS stacks `z-index` among siblings.
 The viewport takes the keys of HTML's viewport: `width` and `height` in
 design pixels, `minimum-scale` and `maximum-scale` (`min-scale` and
 `max-scale` also work), and `initial-scale` when there is no design
-size. A UIScale scales the body to the camera's `ViewportSize`. The
-scale is the smaller of the two ratios of the screen to the design size,
-clamped to the bounds. The body is the screen divided by that scale, so
-every size inside it reads in design pixels. `width=device-width,
+size. A UIScale scales the body to the `AbsoluteSize` of the ScreenGui.
+That size leaves out the top bar when the document keeps the insets, so
+the whole design size shows under the bar. Before the ScreenGui has a
+size, the camera's `ViewportSize` stands in. The scale is the smaller
+of the two ratios of the screen to the design size, clamped to the
+bounds. The body is the screen divided by that scale, so every size
+inside it reads in design pixels. `width=device-width,
 initial-scale=1` scales nothing. The UIScale is the body's child
 `viewport`, so code can read the scale from its `Scale`.
 

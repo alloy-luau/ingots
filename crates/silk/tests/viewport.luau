@@ -1,5 +1,5 @@
--- The viewport helper against a mock of the camera and the instances it
--- touches. The test in emit.rs puts the helper above this file and runs
+-- The viewport helper against a mock of the camera, the ScreenGui, and
+-- the instances it touches. The test in emit.rs puts the helper above this file and runs
 -- it under `luau`. An error fails the test.
 
 local function signal()
@@ -49,8 +49,26 @@ function INSTANCE:FindFirstChild(name)
 	return nil
 end
 
+function INSTANCE:GetPropertyChangedSignal(k)
+	self.changed = self.changed or {}
+	self.changed[k] = self.changed[k] or signal()
+	return self.changed[k]
+end
+
+function INSTANCE:FindFirstAncestorWhichIsA(class)
+	assert(class == "LayerCollector", class)
+	local at = self.Parent
+	while at ~= nil and at.ClassName ~= "ScreenGui" do
+		at = at.Parent
+	end
+	return at
+end
+
 local function new(class)
-	local o = setmetatable({ ClassName = class, Name = class, Destroying = signal() }, INSTANCE)
+	local o = setmetatable(
+		{ ClassName = class, Name = class, Destroying = signal(), AncestryChanged = signal() },
+		INSTANCE
+	)
 	table.insert(made, o)
 	return o
 end
@@ -126,5 +144,39 @@ local zoomed = __silk_viewport(nil, nil, nil, nil, 1.25, function()
 	return new("Frame")
 end)
 near(zoomed:FindFirstChild("viewport").Scale, 1.25)
+
+-- LANG_BUGS 69: a document that keeps the insets. The ScreenGui is
+-- shorter than the camera by the top bar, and the design height fits in
+-- it. Before the ScreenGui has a size, the camera stands in.
+camera.ViewportSize = { X = 1920, Y = 1080 }
+camera.changed:Fire()
+local gui = new("ScreenGui")
+gui.AbsoluteSize = { X = 0, Y = 0 }
+local hud = __silk_viewport(1280, 720, nil, nil, nil, function()
+	return new("Frame")
+end)
+local fit = hud:FindFirstChild("viewport")
+near(fit.Scale, 1.5)
+hud.Parent = gui
+hud.AncestryChanged:Fire()
+near(fit.Scale, 1.5)
+gui.AbsoluteSize = { X = 1920, Y = 1022 }
+gui:GetPropertyChangedSignal("AbsoluteSize"):Fire()
+near(fit.Scale, 1022 / 720)
+near(1022 * hud.Size.Y, 720)
+
+-- The ScreenGui decides while it has a size.
+camera.ViewportSize = { X = 640, Y = 360 }
+camera.changed:Fire()
+near(fit.Scale, 1022 / 720)
+
+-- Out of the ScreenGui, the camera decides again, and the old ScreenGui
+-- no longer moves the scale.
+hud.Parent = nil
+hud.AncestryChanged:Fire()
+near(fit.Scale, 0.5)
+gui.AbsoluteSize = { X = 1920, Y = 1080 }
+gui:GetPropertyChangedSignal("AbsoluteSize"):Fire()
+near(fit.Scale, 0.5)
 
 print("ok")
