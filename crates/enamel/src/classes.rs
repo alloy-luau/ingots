@@ -2545,10 +2545,14 @@ pub fn resolve(element: Element, classes: &[Class], ctx: &Context) -> Resolved {
             props.push(("Thickness".to_string(), "1".to_string()));
         }
 
-        props.push((
-            "ApplyStrokeMode".to_string(),
-            "Enum.ApplyStrokeMode.Border".to_string(),
-        ));
+        // The border is the Tailwind reading. `stroke-contextual` asks
+        // for the outline of the text, so the default stays out.
+        if !stroke.contains_key("ApplyStrokeMode") {
+            props.push((
+                "ApplyStrokeMode".to_string(),
+                "Enum.ApplyStrokeMode.Border".to_string(),
+            ));
+        }
         out.children.push(Child {
             class: "UIStroke",
             props,
@@ -3467,6 +3471,30 @@ mod tests {
                 .contains(&("AutomaticCanvasSize".into(), "Enum.AutomaticSize.Y".into()))
         );
         assert!(s.problems.is_empty(), "{:?}", s.problems);
+    }
+
+    /// A UIStroke takes one `ApplyStrokeMode`: the class that names one,
+    /// else the border.
+    #[test]
+    fn a_stroke_mode_class_replaces_the_border_mode() {
+        let modes = |classes: &str| {
+            resolved("TextLabel", classes)
+                .children
+                .into_iter()
+                .find(|c| c.class == "UIStroke")
+                .unwrap()
+                .props
+                .into_iter()
+                .filter(|(k, _)| k == "ApplyStrokeMode")
+                .map(|(_, v)| v)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            modes("stroke-4 stroke-contextual"),
+            ["Enum.ApplyStrokeMode.Contextual"]
+        );
+        assert_eq!(modes("stroke-4"), ["Enum.ApplyStrokeMode.Border"]);
     }
 
     #[test]
