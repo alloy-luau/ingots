@@ -2222,9 +2222,12 @@ impl<'a> Writer<'a> {
         // ---- the order of the children
         let has_holes = !holes.is_empty();
         // A hole in a box is a child, as `{children}` is, and not text. So
-        // is a hole beside a `Text` the author wrote.
+        // is a hole beside a `Text` the author wrote, and a hole beside an
+        // element that stands as an instance of its own with no text:
+        // `<button>{icon}<span className="x">b</span></button>`.
         let holes_are_children = matches!(kind, Kind::Block | Kind::List | Kind::Table | Kind::Row)
-            || written.contains("Text");
+            || written.contains("Text")
+            || (!holds_text && !boxes.is_empty());
         let flow = matches!(kind, Kind::Block | Kind::List | Kind::Table) || demoted || button_row;
         // A table row orders its cells; the table's layout places them.
         let ordered = flow || kind == Kind::Row;
@@ -4940,6 +4943,31 @@ assert(__silk_not(false) == true)
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    /// LANG_BUGS 67: a hole beside an element of its own in a button is
+    /// a child, and the button shows no text. Beside text, or beside an
+    /// inline tag that folds into the text, the hole stays text.
+    #[test]
+    fn a_hole_beside_an_element_of_a_button_is_a_child() {
+        let src = "return <button className=\"appearance-none\">\n  {child}\n  <span style={{ position = \"absolute\" }}>b</span>\n</button>\n";
+
+        for out in [vide(src), silk(src)] {
+            assert!(!out.contains("Text={child}"), "{out}");
+            assert!(out.contains("Text={\"\"}"), "{out}");
+            assert!(out.contains("<>{child}</>"), "{out}");
+        }
+
+        // A box beside the hole in a row: the hole takes its place.
+        let out = vide("return <button>{icon}<img src=\"rbxassetid://1\" /></button>\n");
+        assert!(out.contains("<>{__silk_order(icon, 1000)}</>"), "{out}");
+        assert!(out.contains("Text={\"\"}"), "{out}");
+
+        let out = silk("return <button>{count}<b>!</b></button>\n");
+        assert!(out.contains("{__silk_rich(count)}\\<b>!\\</b>"), "{out}");
+
+        let out = silk("return <button>{label}</button>\n");
+        assert!(out.contains("Text={label}"), "{out}");
     }
 
     /// LANG_BUGS 66: a Luau background color in `style` shows the box,
