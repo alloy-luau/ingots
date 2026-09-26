@@ -463,6 +463,26 @@ pub struct ColorValue {
     pub expr: String,
     pub rgb: Option<(u8, u8, u8)>,
     pub alpha: f64,
+    /// The color is a name from the theme file, so the file needs the
+    /// theme's prelude: the expression may name a local there.
+    pub theme: bool,
+}
+
+impl ColorValue {
+    /// The utility that sets this color through `pieces`, with its
+    /// swatch at `alpha`. Every color class ends here, so a theme color
+    /// marks the theme as used in one place.
+    fn utility(&self, mut pieces: Vec<Piece>, summary: String, alpha: f64) -> Utility {
+        if self.theme {
+            pieces.push(Piece::Theme);
+        }
+
+        Utility {
+            pieces,
+            summary,
+            color: self.rgb.map(|rgb| (rgb, alpha)),
+        }
+    }
 }
 
 /// A color word: a palette name, `white`, a name from the theme,
@@ -484,6 +504,7 @@ pub fn color(word: &str, theme: &Theme) -> Option<ColorValue> {
                 expr: color3(c),
                 rgb: Some(c),
                 alpha,
+                theme: false,
             });
         }
 
@@ -493,6 +514,7 @@ pub fn color(word: &str, theme: &Theme) -> Option<ColorValue> {
             expr: inner.replace('_', " "),
             rgb: None,
             alpha,
+            theme: false,
         });
     }
 
@@ -509,6 +531,7 @@ pub fn color(word: &str, theme: &Theme) -> Option<ColorValue> {
             expr,
             rgb: entry.color(),
             alpha,
+            theme: true,
         });
     }
 
@@ -518,6 +541,7 @@ pub fn color(word: &str, theme: &Theme) -> Option<ColorValue> {
         expr: color3(c),
         rgb: Some(c),
         alpha,
+        theme: false,
     })
 }
 
@@ -1520,11 +1544,11 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
                 pieces.push(Piece::Stroke("Transparency", num(1.0 - c.alpha)));
             }
 
-            Some(Utility {
+            Some(c.utility(
                 pieces,
-                summary: format!("a UIStroke colored {}", color_words(&c)),
-                color: c.rgb.map(|rgb| (rgb, c.alpha)),
-            })
+                format!("a UIStroke colored {}", color_words(&c)),
+                c.alpha,
+            ))
         }
         "text-stroke" => {
             let c = color(rest, theme)?;
@@ -1533,11 +1557,11 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
                 prop("TextStrokeTransparency", num(1.0 - c.alpha), Needs::Text),
             ];
 
-            Some(Utility {
+            Some(c.utility(
                 pieces,
-                summary: format!("a text outline colored {}", color_words(&c)),
-                color: c.rgb.map(|rgb| (rgb, c.alpha)),
-            })
+                format!("a text outline colored {}", color_words(&c)),
+                c.alpha,
+            ))
         }
         "text-size" => {
             let n = arbitrary(rest)
@@ -1869,11 +1893,11 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
                 pieces.push(Piece::Stroke("Transparency", num(1.0 - c.alpha)));
             }
 
-            Some(Utility {
+            Some(c.utility(
                 pieces,
-                summary: format!("a UIStroke colored {}", color_words(&c)),
-                color: c.rgb.map(|rgb| (rgb, c.alpha)),
-            })
+                format!("a UIStroke colored {}", color_words(&c)),
+                c.alpha,
+            ))
         }
         "bg" => {
             if let Some(dir) = rest.strip_prefix("gradient-to-") {
@@ -1896,11 +1920,7 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
                 ));
             }
 
-            Some(Utility {
-                pieces,
-                summary: format!("background {}", color_words(&c)),
-                color: c.rgb.map(|rgb| (rgb, c.alpha)),
-            })
+            Some(c.utility(pieces, format!("background {}", color_words(&c)), c.alpha))
         }
         "from" | "via" | "to" => {
             let c = color(rest, theme)?;
@@ -1912,11 +1932,11 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
                 "to"
             };
 
-            Some(Utility {
-                pieces: vec![Piece::GradientStop(stop, c.expr.clone())],
-                summary: format!("gradient stop {}", color_words(&c)),
-                color: c.rgb.map(|rgb| (rgb, 1.0)),
-            })
+            Some(c.utility(
+                vec![Piece::GradientStop(stop, c.expr.clone())],
+                format!("gradient stop {}", color_words(&c)),
+                1.0,
+            ))
         }
         "text" => {
             if let Some(size) = text_size(rest) {
@@ -1933,20 +1953,16 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
                 pieces.push(prop("TextTransparency", num(1.0 - c.alpha), Needs::Text));
             }
 
-            Some(Utility {
-                pieces,
-                summary: format!("text {}", color_words(&c)),
-                color: c.rgb.map(|rgb| (rgb, c.alpha)),
-            })
+            Some(c.utility(pieces, format!("text {}", color_words(&c)), c.alpha))
         }
         "placeholder" => {
             let c = color(rest, theme)?;
 
-            Some(Utility {
-                pieces: vec![prop("PlaceholderColor3", c.expr.clone(), Needs::TextBox)],
-                summary: format!("placeholder {}", color_words(&c)),
-                color: c.rgb.map(|rgb| (rgb, 1.0)),
-            })
+            Some(c.utility(
+                vec![prop("PlaceholderColor3", c.expr.clone(), Needs::TextBox)],
+                format!("placeholder {}", color_words(&c)),
+                1.0,
+            ))
         }
         "image" => {
             if let Some(inner) = arbitrary(rest)
@@ -1967,11 +1983,7 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
                 pieces.push(prop("ImageTransparency", num(1.0 - c.alpha), Needs::Image));
             }
 
-            Some(Utility {
-                pieces,
-                summary: format!("image tint {}", color_words(&c)),
-                color: c.rgb.map(|rgb| (rgb, c.alpha)),
-            })
+            Some(c.utility(pieces, format!("image tint {}", color_words(&c)), c.alpha))
         }
         "font" => {
             if let Some(w) = weight(rest) {
@@ -2278,12 +2290,15 @@ pub fn resolve(element: Element, classes: &[Class], ctx: &Context) -> Resolved {
         }
 
         // The pieces above skip a property the element lacks; a class
-        // that set nothing at all on this element says so.
+        // that set nothing at all on this element says so. The theme
+        // marker sets nothing of its own.
         if let Some(u) = parse(class, ctx)
             && !u.pieces.is_empty()
-            && u.pieces
-                .iter()
-                .all(|p| matches!(p, Piece::Prop { needs, .. } if !needs.met_by(element)))
+            && u.pieces.iter().all(|p| match p {
+                Piece::Prop { needs, .. } => !needs.met_by(element),
+
+                p => *p == Piece::Theme,
+            })
             && let Some(Piece::Prop { name, needs, .. }) = u.pieces.first()
         {
             out.problems
@@ -3382,6 +3397,47 @@ mod tests {
                 .iter()
                 .any(|(_, v)| v.contains("GothamSSm") && v.contains("Bold"))
         );
+    }
+
+    /// A theme color on any utility, a gradient stop too, puts the
+    /// theme's prelude in the file: the color may name a local there.
+    #[test]
+    fn a_theme_color_marks_the_theme_as_used() {
+        let ctx = Context {
+            fonts: Fonts::default(),
+            theme: crate::theme::parse(
+                "local gold = Color3.fromRGB(255, 214, 92)\nexport const colors = { accent = gold }\n",
+            ),
+        };
+        let uses = |tag: &str, classes: &str| {
+            let cs: Vec<Class> = classes.split_whitespace().map(Class::parse).collect();
+            let r = resolve(Element::parse(tag).unwrap(), &cs, &ctx);
+
+            (r.uses_theme, r.problems)
+        };
+
+        for (tag, classes) in [
+            ("Frame", "bg-gradient-to-b from-accent to-orange-500"),
+            ("Frame", "via-accent"),
+            ("Frame", "to-accent"),
+            ("Frame", "bg-accent/50"),
+            ("Frame", "stroke-accent"),
+            ("Frame", "ring-accent"),
+            ("Frame", "hover:bg-accent"),
+            ("TextLabel", "text-accent"),
+            ("TextLabel", "text-stroke-accent"),
+            ("TextBox", "placeholder-accent"),
+            ("ImageLabel", "image-accent"),
+        ] {
+            assert_eq!(uses(tag, classes), (true, Vec::new()), "{classes}");
+        }
+
+        assert!(!uses("Frame", "bg-red-500 from-white").0);
+        // The marker does not hide a class the element lacks.
+        assert!(matches!(
+            &uses("Frame", "text-accent").1[..],
+            [(0, Problem::WrongElement(n, Needs::Text))] if n == "TextColor3"
+        ));
     }
 
     #[test]
