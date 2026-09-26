@@ -153,8 +153,7 @@ impl Handler for Enamel {
 
         if !settings.root.is_empty() {
             let root = std::path::Path::new(&settings.root);
-            self.table = std::fs::read_to_string(root.join("alloy.toml"))
-                .is_ok_and(|toml| emit::table_form(&toml));
+            self.table = emit::table_form(root);
             self.watched = theme::Watched::at(root);
             self.ctx.theme = self.watched.theme.clone();
         }

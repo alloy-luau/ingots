@@ -18,8 +18,9 @@ connects `MouseEnter` and `MouseLeave`. In a text element, a body of one
 `{ }` hole is the Text. When the classes add a child there, the hole
 becomes a `Text={...}` attribute, so it does not turn into a child.
 
-Vide and Fusion use the table form of `[alx.factory]` in `alloy.toml`.
-There, a one-line component calls `Instance.new` for each child that
+Vide and Fusion use the table form of `[alx.factory]`. Enamel reads
+the factory where Alloy does: `alloy.toml`, else `.config.aly`, and
+`luaux.toml` when that file sets no factory. There, a one-line component calls `Instance.new` for each child that
 the classes add. Vide types its factory over 19 classes, so a factory
 call for a `UIPadding` or a `UIStroke` fails the type check.
 
