@@ -1,6 +1,6 @@
--- The state helper against a mock of the Roblox pieces it touches. The
--- test in emit.rs puts the helper above this file and runs it under
--- `luau`. An error fails the test.
+-- The state helper and the child component against a mock of the
+-- Roblox pieces they touch. The test in emit.rs puts both above this
+-- file and runs it under `luau`. An error fails the test.
 
 -- In deferred mode a signal fires at flush(), as Roblox's default does.
 local deferred = false
@@ -37,7 +37,7 @@ end
 -- Roblox stores these as float32, so a read gives less than the write.
 local FLOATS = { BackgroundTransparency = true, Scale = true, Thickness = true }
 
-local function Instance(class, props)
+local function make(class, props)
 	local store, children, changed = {}, {}, {}
 	local api = {
 		ClassName = class,
@@ -136,6 +136,12 @@ game = {
 	end,
 }
 
+Instance = {
+	new = function(class)
+		return make(class, {})
+	end,
+}
+
 local failures = {}
 
 local function check(label, got, want)
@@ -153,9 +159,9 @@ for _, mode in { "immediate", "deferred" } do
 
 		-- hover:scale-110 hover:stroke-yellow-400 hover:ring-4: the helper
 		-- sets the UIScale and the UIStroke children, and puts them back.
-		local stroke = Instance("UIStroke", { Thickness = 0, Color = 0 })
-		local scale = Instance("UIScale", { Scale = 1 })
-		local el = Instance("TextButton", {}):Add(stroke):Add(scale)
+		local stroke = make("UIStroke", { Thickness = 0, Color = 0 })
+		local scale = make("UIScale", { Scale = 1 })
+		local el = make("TextButton", {}):Add(stroke):Add(scale)
 		__enamel(
 			el,
 			{ hover = { UIScale = { Scale = 1.1 }, UIStroke = { Color = 5, Thickness = 4 } } },
@@ -177,7 +183,7 @@ for _, mode in { "immediate", "deferred" } do
 		-- hover:bg-transparency-90 changes it. The effect writes the
 		-- value of the source now and on each change, as Vide does.
 		local picked = false
-		local button = Instance("TextButton", {})
+		local button = make("TextButton", {})
 		local function effect()
 			button.BackgroundTransparency = if picked then 0 else 1
 		end
@@ -226,6 +232,12 @@ for _, mode in { "immediate", "deferred" } do
 		check(`{tag}: rest after a plain hover`, button.BackgroundTransparency, 0)
 	end
 end
+
+-- The table form makes a child with Instance.new, not with the factory.
+local padding = __enamel_child({ Class = "UIPadding", PaddingTop = 4 })
+check("child class", if padding.ClassName == "UIPadding" then 1 else 0, 1)
+check("child property", padding.PaddingTop, 4)
+check("child keeps no Class", if padding.Class == nil then 1 else 0, 1)
 
 if #failures > 0 then
 	error(table.concat(failures, "\n"))

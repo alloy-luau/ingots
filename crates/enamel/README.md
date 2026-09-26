@@ -16,6 +16,11 @@ The `Frame` gets `BackgroundColor3`, `BackgroundTransparency`, and
 The button's `hover:` wraps the element in a one-line helper that
 connects `MouseEnter` and `MouseLeave`.
 
+Vide and Fusion use the table form of `[alx.factory]` in `alloy.toml`.
+There, a one-line component calls `Instance.new` for each child that
+the classes add. Vide types its factory over 19 classes, so a factory
+call for a `UIPadding` or a `UIStroke` fails the type check.
+
 ## What maps
 
 | Classes | Roblox |

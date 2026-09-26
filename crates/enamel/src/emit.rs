@@ -37,6 +37,10 @@ impl Plan<'_> {
         self.resolved.uses_theme
     }
 
+    pub fn adds_children(&self) -> bool {
+        !self.resolved.children.is_empty()
+    }
+
     /// The attribute text that replaces `ClassName="..."`.
     fn attributes(&self) -> String {
         self.resolved
@@ -47,8 +51,11 @@ impl Plan<'_> {
             .join(" ")
     }
 
-    /// The children the classes add, as markup.
-    fn children(&self) -> String {
+    /// The children the classes add, as markup. `child` names the
+    /// component of [`child_text`] in the table form: a `<UIPadding>` tag
+    /// would lower to a factory call, and Vide types its factory over 19
+    /// classes, with no UIPadding, UIStroke, or UIScale.
+    fn children(&self, child: Option<&str>) -> String {
         self.resolved
             .children
             .iter()
@@ -59,7 +66,11 @@ impl Plan<'_> {
                     .map(|(k, v)| format!(" {k}={{{v}}}"))
                     .collect::<String>();
 
-                format!("<{}{props} />", c.class)
+                match child {
+                    Some(name) => format!("<{name} Class=\"{}\"{props} />", c.class),
+
+                    None => format!("<{}{props} />", c.class),
+                }
             })
             .collect()
     }
@@ -85,8 +96,9 @@ impl Plan<'_> {
         format!("{{ {states} }}")
     }
 
-    /// The edits for this element. `helper` names the state function.
-    pub fn edits(&self, helper: &str) -> Vec<Edit> {
+    /// The edits for this element. `helper` names the state function;
+    /// `table` says the project lowers markup in the table form.
+    pub fn edits(&self, helper: &str, table: bool) -> Vec<Edit> {
         let f = self.found;
         let mut edits = Vec::new();
 
@@ -97,7 +109,8 @@ impl Plan<'_> {
         let attrs = self.attributes();
         edits.push(Edit::replace(f.attr.0 as u32, f.attr.1 as u32, attrs));
 
-        let children = self.children();
+        let child = format!("{helper}_child");
+        let children = self.children(table.then_some(child.as_str()));
 
         if !children.is_empty() {
             match f.self_close {
@@ -167,6 +180,58 @@ return el end "
     )
 }
 
+/// The component that makes a child the classes add, in the table form.
+/// Vide and Fusion build instances, so `Instance.new` makes the child and
+/// no typed factory call names its class.
+pub fn child_text(helper: &str) -> String {
+    format!(
+        "local function {helper}_child(props: any): Instance local c: any = Instance.new(props.Class) for k, v in props do if k ~= \"Class\" then c[k] = v end end return c end "
+    )
+}
+
+/// Whether `alloy.toml` lowers markup in the table form,
+/// `create(name)(props)`, as Vide and Fusion do. It reads
+/// `[alx.factory] backend`, as a table, an inline table, or a dotted key.
+// ponytail: a factory set in `.config.aly` or `luaux.toml` keeps the
+// markup children. Read the factory from the host once init carries it.
+pub fn table_form(toml: &str) -> bool {
+    let mut table = String::new();
+
+    for line in toml.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+
+        if let Some(name) = line.strip_prefix('[') {
+            table = name.trim_end_matches(']').trim().to_string();
+
+            continue;
+        }
+
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = match table.as_str() {
+            "" => key.trim().to_string(),
+
+            t => format!("{t}.{}", key.trim()),
+        };
+        let value: String = value
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .map(|c| if c == '\'' { '"' } else { c })
+            .collect();
+
+        match key.as_str() {
+            "alx.factory.backend" => return value == "\"table\"",
+
+            "alx.factory" => return value.contains("backend=\"table\""),
+
+            _ => {}
+        }
+    }
+
+    false
+}
+
 /// The byte where the helper goes: the start of the first line that is
 /// code, past the leading comments and blank lines.
 pub fn helper_at(source: &str) -> u32 {
@@ -229,7 +294,7 @@ mod tests {
         let src = "local x = <Frame ClassName=\"flex gap-2 bg-red-500 rounded\" Name=\"a\" />\n";
         let found = markup::find(src);
         let plan = plan(&found[0], &Context::default());
-        let out = apply(src, &plan.edits("__enamel"));
+        let out = apply(src, &plan.edits("__enamel", false));
         assert_eq!(
             out,
             "local x = <Frame BackgroundColor3={Color3.fromRGB(239, 68, 68)} Name=\"a\" ><UIListLayout FillDirection={Enum.FillDirection.Horizontal} SortOrder={Enum.SortOrder.LayoutOrder} Padding={UDim.new(0, 8)} /><UICorner CornerRadius={UDim.new(0, 4)} /></Frame>\n"
@@ -241,9 +306,34 @@ mod tests {
         let src = "return (\n    <Frame>\n        <TextButton ClassName=\"bg-red-500 hover:bg-red-600 transition duration-300\">Go</TextButton>\n    </Frame>\n)\n";
         let found = markup::find(src);
         let plan = plan(&found[0], &Context::default());
-        let out = apply(src, &plan.edits("__enamel"));
+        let out = apply(src, &plan.edits("__enamel", false));
         assert!(out.contains(", false, { kind = \"default\", info = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut, 0, false, 0) })}"), "{out}");
         assert!(helper_text("__enamel").contains("TweenService"));
+    }
+
+    /// In the table form a child the classes add is the component of
+    /// `child_text`, so no typed factory call names its class.
+    #[test]
+    fn the_table_form_makes_children_with_the_component() {
+        let src = "return <TextLabel ClassName=\"p-2 rounded\" Text=\"a\" />\n";
+        let found = markup::find(src);
+        let plan = plan(&found[0], &Context::default());
+
+        assert_eq!(
+            apply(src, &plan.edits("__enamel", true)),
+            "return <TextLabel  Text=\"a\" ><__enamel_child Class=\"UIPadding\" PaddingBottom={UDim.new(0, 8)} PaddingLeft={UDim.new(0, 8)} PaddingRight={UDim.new(0, 8)} PaddingTop={UDim.new(0, 8)} /><__enamel_child Class=\"UICorner\" CornerRadius={UDim.new(0, 4)} /></TextLabel>\n"
+        );
+        assert!(apply(src, &plan.edits("__enamel", false)).contains("<UIPadding "));
+
+        assert!(table_form(
+            "[build]\nin = \"src\"\n\n[alx.factory]\nbackend = \"table\" # Vide\ncreate = \"vide.create\"\n"
+        ));
+        assert!(table_form(
+            "[alx]\nfactory = { backend = 'table', create = 'create' }\n"
+        ));
+        assert!(table_form("alx.factory.backend = \"table\"\n"));
+        assert!(!table_form("[alx.factory]\nbackend = \"element\"\n"));
+        assert!(!table_form("[build]\nin = \"src\"\n"));
     }
 
     /// The helper runs under `luau` against the mock element of
@@ -251,8 +341,9 @@ mod tests {
     #[test]
     fn the_helper_runs_against_a_mock_element() {
         let script = format!(
-            "{}\n{}",
+            "{}\n{}\n{}",
             helper_text("__enamel"),
+            child_text("__enamel"),
             include_str!("../tests/helper.luau")
         );
         let path = std::env::temp_dir().join(format!("enamel-helper-{}.luau", std::process::id()));
@@ -278,7 +369,7 @@ mod tests {
         let src = "return (\n    <Frame>\n        <TextButton ClassName=\"bg-red-500 hover:bg-red-600\">Go</TextButton>\n    </Frame>\n)\n";
         let found = markup::find(src);
         let plan = plan(&found[0], &Context::default());
-        let out = apply(src, &plan.edits("__enamel"));
+        let out = apply(src, &plan.edits("__enamel", false));
         assert!(out.contains("{__enamel(<TextButton BackgroundColor3={Color3.fromRGB(239, 68, 68)}>Go</TextButton>, { hover = { BackgroundColor3 = Color3.fromRGB(220, 38, 38) } }, false)}"), "{out}");
         assert_eq!(out.matches('\n').count(), src.matches('\n').count());
     }
