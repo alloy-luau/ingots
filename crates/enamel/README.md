@@ -16,15 +16,16 @@ The `Frame` gets `BackgroundColor3`, `BackgroundTransparency`, and
 The button's `hover:` wraps the element in a one-line helper that
 connects `MouseEnter` and `MouseLeave`. In the element form, for React,
 an element is no instance, so the helper takes the instance as a `ref`,
-through a spread. It sets up once for each instance, and it runs a
-`ref` that Silk wrote on the tag as well. In a text element, a body of one
+through a spread. It sets up once for each instance. When Silk wrote a
+`ref` on the tag, the helper calls that `ref` too. In a text element, a body of one
 `{ }` hole is the Text. When the classes add a child there, the hole
 becomes a `Text={...}` attribute, so it does not turn into a child.
 
 Vide and Fusion use the table form of `[alx.factory]`. The host sends
 the factory at init, from `alloy.toml` or `.config.aly` alike. An older
-host sends none, and Enamel takes the element form. There, a one-line component calls `Instance.new` for each child that
-the classes add. Vide types its factory over 19 classes, so a factory
+host sends none, and Enamel takes the element form. In the table form,
+a one-line component calls `Instance.new` for each child that the
+classes add. Vide types its factory over 19 classes, so a factory
 call for a `UIPadding` or a `UIStroke` fails the type check.
 
 ## What maps

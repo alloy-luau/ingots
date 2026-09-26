@@ -314,8 +314,8 @@ React. It keeps the Roblox tags and the handlers as written. A React
 element is no instance, so a helper that needs the instance takes it as
 a `ref`, through a spread: `{{ ref = __silk(nil, "card", ...) }}`. React
 calls the `ref` again on each render, so the helper sets up once for
-each instance and keeps the latest handler. Enamel runs this `ref` from
-inside its own.
+each instance and keeps the latest handler. The `ref` of Enamel calls
+this `ref` too.
 
 A reactive value reaches the helpers in the shape of its library: a
 Vide or Fluid source is a function, a React binding has `map`, and a
