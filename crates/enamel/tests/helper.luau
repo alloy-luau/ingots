@@ -261,6 +261,39 @@ local binding = {
 }
 check("binding keeps x", __enamel_size(binding, nil, 60).X, 5)
 
+local state = { type = "State" }
+local derived = __enamel_size(state, 70, nil, function(f)
+	return f(function(v)
+		assert(v == state)
+		return UDim2.new(7, 8)
+	end)
+end)
+check("a Fusion state takes x", derived.X, 70)
+check("a Fusion state keeps y", derived.Y, 8)
+
+-- The element form: React calls a ref with the instance, again on each
+-- render, and with nil at the end. The helper sets up once for each
+-- instance, and runs the ref of Silk each time.
+local instances = setmetatable({}, { __mode = "k" })
+typeof = function(v)
+	return if instances[v] then "Instance" else type(v)
+end
+deferred = false
+local ref_el = make("TextButton", { BackgroundTransparency = 1 })
+instances[ref_el] = true
+local ran = 0
+local function silk()
+	ran += 1
+end
+__enamel(nil, { hover = { BackgroundTransparency = 0.5 } }, false, nil, silk)(ref_el)
+__enamel(nil, { hover = { BackgroundTransparency = 0.5 } }, false, nil, silk)(ref_el)
+__enamel(nil, { hover = { BackgroundTransparency = 0.5 } }, false, nil, silk)(nil)
+check("the ref of Silk runs each time", ran, 3)
+check("a ref sets up once", #ref_el.MouseEnter.fns, 1)
+ref_el.MouseEnter:Fire()
+settle()
+check("a ref sets up the hover", ref_el.BackgroundTransparency, 0.5)
+
 if #failures > 0 then
 	error(table.concat(failures, "\n"))
 end

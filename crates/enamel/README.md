@@ -14,7 +14,10 @@ them into the properties and the layout children behind them:
 The `Frame` gets `BackgroundColor3`, `BackgroundTransparency`, and
 `Size`, plus a `UIListLayout`, a `UIPadding`, and a `UICorner` child.
 The button's `hover:` wraps the element in a one-line helper that
-connects `MouseEnter` and `MouseLeave`. In a text element, a body of one
+connects `MouseEnter` and `MouseLeave`. In the element form, for React,
+an element is no instance, so the helper takes the instance as a `ref`,
+through a spread. It sets up once for each instance, and it runs a
+`ref` that Silk wrote on the tag as well. In a text element, a body of one
 `{ }` hole is the Text. When the classes add a child there, the hole
 becomes a `Text={...}` attribute, so it does not turn into a child.
 
@@ -51,7 +54,9 @@ call for a `UIPadding` or a `UIStroke` fails the type check.
 `w-auto` and `h-auto` set `AutomaticSize` on their axis and start that
 axis at 0, so the content sets it. An axis that no class names keeps the
 element's own size. With a `Size` attribute on the tag, the classes set
-their axes inside it, and a source stays a source. With no attribute,
+their axes inside it, and a source stays a source: a Vide function, a
+React binding, or a Fusion state, which the merge derives through the
+`compute` of the factory. With no attribute,
 the axis keeps the Roblox default of 100 pixels.
 
 A `transition` makes each state change a tween: 150ms, Quad in-out,

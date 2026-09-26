@@ -26,6 +26,8 @@ struct Enamel {
     helper: String,
     /// The project lowers markup in the table form, as Vide does.
     table: bool,
+    /// The `compute` of the factory, which derives a Fusion state.
+    compute: Option<String>,
     catalog: Vec<classes::Entry>,
     watched: theme::Watched,
 }
@@ -39,6 +41,7 @@ impl Enamel {
             ctx,
             helper: "__enamel".into(),
             table: false,
+            compute: None,
             catalog,
             watched: theme::Watched::default(),
         }
@@ -153,7 +156,7 @@ impl Handler for Enamel {
 
         if !settings.root.is_empty() {
             let root = std::path::Path::new(&settings.root);
-            self.table = emit::table_form(root);
+            (self.table, self.compute) = emit::factory(root);
             self.watched = theme::Watched::at(root);
             self.ctx.theme = self.watched.theme.clone();
         }
@@ -199,7 +202,12 @@ impl Handler for Enamel {
         let mut edits = Vec::new();
 
         for plan in &plans {
-            edits.extend(plan.edits(&file.source, &self.helper, self.table));
+            edits.extend(plan.edits(
+                &file.source,
+                &self.helper,
+                self.table,
+                self.compute.as_deref(),
+            ));
         }
 
         // The theme's prelude and the state helper share one insert at

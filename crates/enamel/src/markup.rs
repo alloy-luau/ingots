@@ -338,7 +338,7 @@ pub fn comment_end(source: &str, i: usize) -> Option<usize> {
 }
 
 /// Skips a `{ ... }` hole that starts at `i`; returns one past its `}`.
-fn skip_hole(source: &str, mut i: usize) -> usize {
+pub(crate) fn skip_hole(source: &str, mut i: usize) -> usize {
     let bytes = source.as_bytes();
     let mut depth = 0i32;
 

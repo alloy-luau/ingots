@@ -107,8 +107,15 @@ impl Plan<'_> {
     }
 
     /// The edits for this element in `source`. `helper` names the state
-    /// function; `table` says the project lowers markup in the table form.
-    pub fn edits(&self, source: &str, helper: &str, table: bool) -> Vec<Edit> {
+    /// function; `table` says the project lowers markup in the table form,
+    /// and `compute` is the `compute` of its factory, for Fusion.
+    pub fn edits(
+        &self,
+        source: &str,
+        helper: &str,
+        table: bool,
+        compute: Option<&str>,
+    ) -> Vec<Edit> {
         let f = self.found;
         let mut edits = Vec::new();
 
@@ -124,10 +131,11 @@ impl Plan<'_> {
         {
             let axis = |d: Option<classes::Dim>| d.map_or("nil".to_string(), |d| d.luau());
             let (x, y) = self.resolved.size;
+            let derive = compute.map_or(String::new(), |c| format!(", {c}"));
             edits.push(Edit::insert(s as u32, format!("{helper}_size(")));
             edits.push(Edit::insert(
                 e as u32,
-                format!(", {}, {})", axis(x), axis(y)),
+                format!(", {}, {}{derive})", axis(x), axis(y)),
             ));
         }
 
@@ -173,13 +181,44 @@ impl Plan<'_> {
                 .resolved
                 .transition
                 .as_ref()
-                .map_or(String::new(), |t| format!(", {}", t.luau()));
-            let (open, close) = if f.in_children { ("{", "}") } else { ("", "") };
-            edits.push(Edit::insert(f.start as u32, format!("{open}{helper}(")));
-            edits.push(Edit::insert(
-                f.end as u32,
-                format!(", {}, {group}{tween}){close}", self.states_table()),
-            ));
+                .map(classes::Transition::luau);
+
+            match table {
+                true => {
+                    let tween = tween.map_or(String::new(), |t| format!(", {t}"));
+                    let (open, close) = if f.in_children { ("{", "}") } else { ("", "") };
+                    edits.push(Edit::insert(f.start as u32, format!("{open}{helper}(")));
+                    edits.push(Edit::insert(
+                        f.end as u32,
+                        format!(", {}, {group}{tween}){close}", self.states_table()),
+                    ));
+                }
+
+                // A React element is no instance: React hands the instance
+                // to the helper as a `ref`. A `ref` Silk wrote runs first.
+                false => {
+                    let open = &source[f.start..f.open_end];
+                    let silk = open.find("{{ ref = ").map(|at| {
+                        let from = f.start + at;
+
+                        (from, crate::markup::skip_hole(source, from))
+                    });
+                    let after = silk.map_or("nil".to_string(), |(s, e)| {
+                        source[s + "{{ ref = ".len()..e - 2].trim().to_string()
+                    });
+                    let reference = format!(
+                        "{{{{ ref = {helper}(nil, {}, {group}, {}, {after}) }}}}",
+                        self.states_table(),
+                        tween.unwrap_or_else(|| "nil".into())
+                    );
+
+                    match silk {
+                        Some((s, e)) => edits.push(Edit::replace(s as u32, e as u32, reference)),
+
+                        None => edits.push(Edit::insert(f.attr.1 as u32, format!(" {reference}"))),
+                    }
+                }
+            }
         }
 
         edits
@@ -201,7 +240,10 @@ impl Plan<'_> {
 // because the tween writes over it. Watch the tween steps to keep it.
 pub fn helper_text(helper: &str) -> String {
     format!(
-        "local function {helper}(el: any, states: {{ hover: {{ [string]: any }}?, active: {{ [string]: any }}?, focus: {{ [string]: any }}?, group_hover: {{ [string]: any }}? }}, group: boolean, tween: {{ kind: string, info: TweenInfo }}?): any \
+        "local {helper}_done: {{ [any]: boolean }} = setmetatable({{}}, {{ __mode = \"k\" }}) :: any \
+local function {helper}(el: any, states: {{ hover: {{ [string]: any }}?, active: {{ [string]: any }}?, focus: {{ [string]: any }}?, group_hover: {{ [string]: any }}? }}, group: boolean, tween: {{ kind: string, info: TweenInfo }}?, after: any): any \
+if el == nil then return function(value: any) if after ~= nil then local fit: any = after fit(value) end \
+if typeof(value) == \"Instance\" and not {helper}_done[value] then {helper}_done[value] = true {helper}(value, states, group, tween) end end end \
 local function targets(props: {{ [string]: any }}): {{ [any]: {{ [string]: any }} }} local out: {{ [any]: {{ [string]: any }} }} = {{ [el] = {{}} }} for k, v in props do if type(v) == \"table\" then local c = el:FindFirstChildOfClass(k) if c ~= nil then out[c] = v end else out[el][k] = v end end return out end \
 local base: {{ [any]: {{ [string]: any }} }} = {{}} \
 local mine: {{ [any]: {{ [string]: any }} }} = {{}} \
@@ -231,41 +273,52 @@ pub fn child_text(helper: &str) -> String {
 }
 
 /// The merge of a `Size` attribute with the axes the classes name. A
-/// source, a function under Vide or a React binding, stays a source.
+/// source stays a source: a function under Vide, a React binding, and a
+/// Fusion state, which derives through the `compute` of the factory.
 pub fn size_text(helper: &str) -> String {
     format!(
-        "local function {helper}_size(size: any, x: UDim?, y: UDim?): any local function merge(s: UDim2): UDim2 return UDim2.new(x or s.X, y or s.Y) end local kind = type(size) if kind == \"function\" then local read: () -> UDim2 = size return function() return merge(read()) end end if kind == \"table\" and size.map ~= nil then local map: (any, (UDim2) -> UDim2) -> any = size.map return map(size, merge) end return merge(size) end "
+        "local function {helper}_size(size: any, x: UDim?, y: UDim?, compute: any?): any local function merge(s: UDim2): UDim2 return UDim2.new(x or s.X, y or s.Y) end local kind = type(size) if kind == \"function\" then local read: () -> UDim2 = size return function() return merge(read()) end end if kind == \"table\" and size.map ~= nil then local map: (any, (UDim2) -> UDim2) -> any = size.map return map(size, merge) end \
+if kind == \"table\" and compute ~= nil and size.type == \"State\" then local derive: any = compute return derive(function(use: any) return merge(use(size)) end) end \
+return merge(size) end "
     )
 }
 
-/// Whether the project at `root` lowers markup in the table form,
-/// `create(name)(props)`, as Vide and Fusion do. Alloy reads
-/// `alloy.toml`, else `.config.aly`, and reads `luaux.toml` when that file
-/// sets no factory. Silk reads the factory the same way.
-pub fn table_form(root: &std::path::Path) -> bool {
+/// The factory of the project at `root`: whether it lowers markup in the
+/// table form, `create(name)(props)`, as Vide and Fusion do, and the
+/// `compute` it sets for Fusion. Alloy reads `alloy.toml`, else
+/// `.config.aly`, and reads `luaux.toml` when that file sets no factory.
+/// Silk reads the factory the same way.
+pub fn factory(root: &std::path::Path) -> (bool, Option<String>) {
     let read = |name: &str| std::fs::read_to_string(root.join(name)).ok();
-
-    read("alloy.toml")
+    let text = read("alloy.toml")
         .or_else(|| read(".config.aly"))
-        .and_then(|t| backend(&t))
-        .or_else(|| read("luaux.toml").and_then(|t| backend(&t)))
-        .is_some_and(|b| b == "table")
+        .filter(|t| value(t, "backend").is_some() || value(t, "create").is_some())
+        .or_else(|| read("luaux.toml"))
+        .unwrap_or_default();
+
+    (
+        value(&text, "backend").as_deref() == Some("table"),
+        value(&text, "compute"),
+    )
 }
 
-/// The `backend = "..."` a configuration text sets, in TOML or in the
-/// table of a `.config.aly`.
-// ponytail: a `backend` key in another table of the file reads as the
-// factory's. Read the factory from the host once init carries it.
-pub fn backend(text: &str) -> Option<String> {
+/// The string a key of the factory takes, in TOML or in the table of a
+/// `.config.aly`.
+// ponytail: a key of the same name in another table of the file reads as
+// the factory's. Read the factory from the host once init carries it.
+fn value(text: &str, key: &str) -> Option<String> {
     text.lines().find_map(|l| {
         let cut = [l.find('#'), l.find("--")].into_iter().flatten().min();
         let code = &l[..cut.unwrap_or(l.len())];
-        let at = code.find("backend")?;
+        let at = code.find(key)?;
         let bounded = !code[..at]
             .chars()
             .next_back()
             .is_some_and(|c| c.is_alphanumeric() || c == '_');
-        let rest = code[at + 7..].trim_start().strip_prefix('=')?.trim_start();
+        let rest = code[at + key.len()..]
+            .trim_start()
+            .strip_prefix('=')?
+            .trim_start();
         let quote = rest.chars().next().filter(|q| matches!(q, '"' | '\''))?;
         let body = &rest[1..];
 
@@ -335,7 +388,7 @@ mod tests {
         let src = "local x = <Frame ClassName=\"flex gap-2 bg-red-500 rounded\" Name=\"a\" />\n";
         let found = markup::find(src);
         let plan = plan(&found[0], &Context::default());
-        let out = apply(src, &plan.edits(src, "__enamel", false));
+        let out = apply(src, &plan.edits(src, "__enamel", false, None));
         assert_eq!(
             out,
             "local x = <Frame BackgroundColor3={Color3.fromRGB(239, 68, 68)} Name=\"a\" ><UIListLayout FillDirection={Enum.FillDirection.Horizontal} SortOrder={Enum.SortOrder.LayoutOrder} Padding={UDim.new(0, 8)} /><UICorner CornerRadius={UDim.new(0, 4)} /></Frame>\n"
@@ -347,7 +400,7 @@ mod tests {
         let src = "return (\n    <Frame>\n        <TextButton ClassName=\"bg-red-500 hover:bg-red-600 transition duration-300\">Go</TextButton>\n    </Frame>\n)\n";
         let found = markup::find(src);
         let plan = plan(&found[0], &Context::default());
-        let out = apply(src, &plan.edits(src, "__enamel", false));
+        let out = apply(src, &plan.edits(src, "__enamel", true, None));
         assert!(out.contains(", false, { kind = \"default\", info = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut, 0, false, 0) })}"), "{out}");
         assert!(helper_text("__enamel").contains("TweenService"));
     }
@@ -361,12 +414,12 @@ mod tests {
         let plan = plan(&found[0], &Context::default());
 
         assert_eq!(
-            apply(src, &plan.edits(src, "__enamel", true)),
+            apply(src, &plan.edits(src, "__enamel", true, None)),
             "return <TextLabel  Text=\"a\" ><__enamel_child Class=\"UIPadding\" PaddingBottom={UDim.new(0, 8)} PaddingLeft={UDim.new(0, 8)} PaddingRight={UDim.new(0, 8)} PaddingTop={UDim.new(0, 8)} /><__enamel_child Class=\"UICorner\" CornerRadius={UDim.new(0, 4)} /></TextLabel>\n"
         );
-        assert!(apply(src, &plan.edits(src, "__enamel", false)).contains("<UIPadding "));
+        assert!(apply(src, &plan.edits(src, "__enamel", false, None)).contains("<UIPadding "));
 
-        let table = |t: &str| backend(t).as_deref() == Some("table");
+        let table = |t: &str| value(t, "backend").as_deref() == Some("table");
         assert!(table(
             "[build]\nin = \"src\"\n\n[alx.factory]\nbackend = \"table\" # Vide\ncreate = \"vide.create\"\n"
         ));
@@ -392,7 +445,7 @@ mod tests {
 
             apply(
                 src,
-                &plan(&found[0], &Context::default()).edits(src, "__enamel", false),
+                &plan(&found[0], &Context::default()).edits(src, "__enamel", false, None),
             )
         };
 
@@ -422,8 +475,14 @@ mod tests {
 
         assert!(plan.merges_size());
         assert_eq!(
-            apply(src, &plan.edits(src, "__enamel", false)),
+            apply(src, &plan.edits(src, "__enamel", false, None)),
             "return <Frame BackgroundColor3={Color3.fromRGB(239, 68, 68)} Size={__enamel_size(UDim2.new(1, 0, 0, 0), nil, UDim.new(0, 40))} />\n"
+        );
+
+        // Under Fusion the merge derives a state through `compute`.
+        assert!(
+            apply(src, &plan.edits(src, "__enamel", true, Some("computed")))
+                .contains("UDim.new(0, 40), computed)}")
         );
 
         // With no attribute, the classes write the whole Size.
@@ -466,8 +525,22 @@ mod tests {
         let src = "return (\n    <Frame>\n        <TextButton ClassName=\"bg-red-500 hover:bg-red-600\">Go</TextButton>\n    </Frame>\n)\n";
         let found = markup::find(src);
         let plan = plan(&found[0], &Context::default());
-        let out = apply(src, &plan.edits(src, "__enamel", false));
+        let out = apply(src, &plan.edits(src, "__enamel", true, None));
         assert!(out.contains("{__enamel(<TextButton BackgroundColor3={Color3.fromRGB(239, 68, 68)}>Go</TextButton>, { hover = { BackgroundColor3 = Color3.fromRGB(220, 38, 38) } }, false)}"), "{out}");
         assert_eq!(out.matches('\n').count(), src.matches('\n').count());
+
+        // React's element is no instance: the helper takes it as a `ref`.
+        let out = apply(src, &plan.edits(src, "__enamel", false, None));
+        assert!(out.contains("<TextButton BackgroundColor3={Color3.fromRGB(239, 68, 68)} {{ ref = __enamel(nil, { hover = { BackgroundColor3 = Color3.fromRGB(220, 38, 38) } }, false, nil, nil) }}>Go</TextButton>"), "{out}");
+
+        // A `ref` that Silk wrote runs inside the one of Enamel.
+        let src = "return <TextButton Name={\"b\"} {{ ref = __silk(nil, \"x\", nil, nil, nil, nil) }} ClassName=\"hover:bg-red-600\">Go</TextButton>\n";
+        let found = markup::find(src);
+        let out = apply(
+            src,
+            &super::plan(&found[0], &Context::default()).edits(src, "__enamel", false, None),
+        );
+        assert!(out.contains("{{ ref = __enamel(nil, { hover = { BackgroundColor3 = Color3.fromRGB(220, 38, 38) } }, false, nil, __silk(nil, \"x\", nil, nil, nil, nil)) }}"), "{out}");
+        assert_eq!(out.matches("ref =").count(), 1, "{out}");
     }
 }
