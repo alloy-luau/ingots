@@ -189,10 +189,11 @@ default for the resting look.
 A class of the project's `enamel.aly` counts as the utilities or the
 properties behind it. With `panel = 'bg-glass/75 rounded-2xl stroke'`,
 the class replaces the background, the corner, and the border of a
-`<button className="panel">`. A `w-` or `h-` class replaces the size
-on its axis, and Silk passes its own size on the other axis to Enamel
-as a class: `<div className="w-full">` keeps its automatic height as
-`w-full h-0 h-auto`.
+`<button className="panel">`. A `w-` or `h-` class sets its axis inside
+the `Size` Silk writes, and the other axis keeps Silk's size. Enamel
+writes `AutomaticSize`, so Silk passes its own automatic axis on as a
+class: `<div className="w-full">` keeps its automatic height as
+`w-full h-auto`.
 
 Every class also becomes a tag, so `.card` in a `<style>` still
 matches. In the editor, Enamel completes and explains its utilities in

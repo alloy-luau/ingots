@@ -19,9 +19,11 @@ pub const GRID: &str = "layout:grid";
 /// A class that arranges the children in the layout: `gap-2`,
 /// `justify-between`, `items-center`.
 pub const ARRANGE: &str = "layout:arrange";
-/// The width of `Size`, and the X axis of `AutomaticSize`.
+/// A class that sets the width of `Size`: `w-full`. Enamel sets it
+/// inside the `Size` the tag writes, so Silk's height stays.
 pub const SIZE_X: &str = "size:x";
 pub const SIZE_Y: &str = "size:y";
+/// `w-auto`: the X axis of `AutomaticSize`, which starts at 0.
 pub const AUTO_X: &str = "auto:x";
 pub const AUTO_Y: &str = "auto:y";
 

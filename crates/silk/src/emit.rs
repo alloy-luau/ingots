@@ -1498,29 +1498,19 @@ impl<'a> Writer<'a> {
             let x = named(crate::enamel::SIZE_X, crate::enamel::AUTO_X);
             let y = named(crate::enamel::SIZE_Y, crate::enamel::AUTO_Y);
 
+            let (size, auto) = props::size_props(w, h);
+            m.set("Size", size);
+
             if x.0 || x.1 || y.0 || y.1 {
-                // Enamel writes `Size` and `AutomaticSize`, with the Roblox
-                // 100 px on an axis no class names. Silk names its own
-                // axis as a class, so the two write one size.
-                let mut more = String::new();
-
-                for (axis, (sized, auto), value) in [("w", x, w), ("h", y, h)] {
-                    match (sized, auto, value) {
-                        (true, ..) => {}
-
-                        (false, true, _) => more.push_str(&format!(" {axis}-0")),
-
-                        (false, false, Axis::Auto) => {
-                            more.push_str(&format!(" {axis}-0 {axis}-auto"))
-                        }
-
-                        (false, false, Axis::Len(l)) => {
-                            if let Some(c) = len_class(l) {
-                                more.push_str(&format!(" {axis}-{c}"));
-                            }
-                        }
-                    }
-                }
+                // Enamel sets the axes its classes name inside Silk's
+                // `Size`, and writes `AutomaticSize` from `w-auto` and
+                // `h-auto` alone. So Silk passes its own automatic axis on
+                // as that class, and writes no `AutomaticSize` itself.
+                let more: String = [("w", x, w), ("h", y, h)]
+                    .iter()
+                    .filter(|(_, (sized, auto), value)| !sized && !auto && *value == Axis::Auto)
+                    .map(|(axis, ..)| format!(" {axis}-auto"))
+                    .collect();
 
                 if let Some(t) = class_end
                     && !more.is_empty()
@@ -1528,8 +1518,6 @@ impl<'a> Writer<'a> {
                     self.insert(t, RANK_TEXT, more);
                 }
             } else {
-                let (size, auto) = props::size_props(w, h);
-                m.set("Size", size);
                 m.set("AutomaticSize", auto);
             }
 
@@ -2761,23 +2749,6 @@ pub fn target_of(class: &str) -> Target {
     }
 }
 
-/// A length as the value of an Enamel `w-` or `h-` class: `full`,
-/// `[50%]`, `[120px]`. Enamel has no class for a scale and an offset
-/// together, `calc(100% - 8px)`.
-fn len_class(l: css::Len) -> Option<String> {
-    match (l.scale, l.offset) {
-        (0.0, 0.0) => Some("0".into()),
-
-        (1.0, 0.0) => Some("full".into()),
-
-        (s, 0.0) => Some(format!("[{}%]", css::num(s * 100.0))),
-
-        (0.0, o) => Some(format!("[{}px]", css::num(o))),
-
-        _ => None,
-    }
-}
-
 /// A RichText tag written as markup text: `\<b>`.
 fn escape_tag(tag: &str) -> String {
     tag.replace('<', "\\<")
@@ -3476,21 +3447,27 @@ mod tests {
     #[test]
     fn a_size_class_replaces_the_size_on_its_axis() {
         let out = with_enamel("return <div className=\"w-full h-full\" />\n");
-        assert!(!out.contains("Size="), "{out}");
+        assert!(out.contains("Size={UDim2.fromScale(1, 0)}"), "{out}");
+        assert!(!out.contains("AutomaticSize"), "{out}");
         assert!(out.contains("ClassName=\"w-full h-full\""), "{out}");
 
         let out = with_enamel("return <div className=\"w-full\" />\n");
-        assert!(!out.contains("Size="), "{out}");
-        assert!(out.contains("ClassName=\"w-full h-0 h-auto\""), "{out}");
+        assert!(!out.contains("AutomaticSize"), "{out}");
+        assert!(out.contains("ClassName=\"w-full h-auto\""), "{out}");
 
         let out = with_enamel("return <div className=\"h-full\" />\n");
-        assert!(out.contains("ClassName=\"h-full w-full\""), "{out}");
+        assert!(out.contains("ClassName=\"h-full\""), "{out}");
 
         let out = with_enamel("return <button className=\"w-auto\">Go</button>\n");
-        assert!(out.contains("ClassName=\"w-auto w-0 h-0 h-auto\""), "{out}");
+        assert!(out.contains("Size={UDim2.new()}"), "{out}");
+        assert!(out.contains("ClassName=\"w-auto h-auto\""), "{out}");
 
-        let out = with_enamel("return <img className=\"h-full\" width=\"32\" />\n");
-        assert!(out.contains("ClassName=\"h-full w-[32px]\""), "{out}");
+        // A scale and an offset stay in Silk's Size for Enamel to merge.
+        let out = with_enamel(
+            "return <div className=\"h-10\" style={{ width = \"calc(100% - 8px)\" }} />\n",
+        );
+        assert!(out.contains("Size={UDim2.new(1, -8, 0, 0)}"), "{out}");
+        assert!(out.contains("ClassName=\"h-10\""), "{out}");
     }
 
     /// Game UI 21: a theme class leaves out what its utilities set.
