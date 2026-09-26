@@ -50,12 +50,14 @@ Roblox easing style, `ease-back`, `ease-bounce`, `ease-expo`, with
 `ease-in-out` are Quad. A property a tween cannot move, a font or a
 boolean, is set at once.
 
-A state changes a property of the element, and also a scale or a
-stroke: `hover:scale-110`, `hover:ring-4`, and `hover:stroke-yellow-400`
-change the UIScale or the UIStroke child. With no such class at rest,
-the child starts at a scale of 1 or a stroke of no width, as in
-Tailwind. A padding, a layout, or a corner cannot change with a state,
-and the `no_effect` lint says so.
+A state changes a property of the element, a scale, or a stroke.
+`hover:scale-110`, `hover:ring-4`, and `hover:stroke-yellow-400` change
+the UIScale or the UIStroke child. With no such class at rest, the child
+starts at a scale of 1 or a stroke of no width, as in Tailwind. A
+padding, a layout, or a corner cannot change with a state, and the
+`no_effect` lint says so. A source, such as a Vide function, can drive a
+property that a state changes. When the state ends, the element goes
+back to the latest value of that source.
 
 A margin, a shadow, or a cursor has no property on a GuiObject: the
 class parses and the `no_effect` lint says so. A text utility on a

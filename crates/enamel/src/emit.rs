@@ -135,15 +135,28 @@ impl Plan<'_> {
 /// The helper as one line of Alloy, so the file keeps its line count.
 /// A table value in a state holds the properties of a child, `UIScale`
 /// or `UIStroke`, which the helper finds by its class.
+///
+/// `base` holds the rest value of each property a state changes. A
+/// source, such as a Vide function or a Fusion state, can write the
+/// property after the wrap. The helper watches the property, and a write
+/// that is not its own becomes the rest value. `mine` holds the value
+/// the helper wrote, as read back, because a float property keeps less
+/// precision than the number written. `busy` covers the immediate signal
+/// mode. A change while a tween moves the property comes from the tween.
+// ponytail: a source write during a tween of the same property is lost,
+// because the tween writes over it. Watch the tween steps to keep it.
 pub fn helper_text(helper: &str) -> String {
     format!(
         "local function {helper}(el: any, states: {{ hover: {{ [string]: any }}?, active: {{ [string]: any }}?, focus: {{ [string]: any }}?, group_hover: {{ [string]: any }}? }}, group: boolean, tween: {{ kind: string, info: TweenInfo }}?): any \
 local function targets(props: {{ [string]: any }}): {{ [any]: {{ [string]: any }} }} local out: {{ [any]: {{ [string]: any }} }} = {{ [el] = {{}} }} for k, v in props do if type(v) == \"table\" then local c = el:FindFirstChildOfClass(k) if c ~= nil then out[c] = v end else out[el][k] = v end end return out end \
 local base: {{ [any]: {{ [string]: any }} }} = {{}} \
+local mine: {{ [any]: {{ [string]: any }} }} = {{}} \
+local moving: {{ [any]: {{ [string]: any }} }} = {{}} \
+local busy = false \
 local sets: {{ [string]: {{ [any]: {{ [string]: any }} }} }} = {{}} \
-for name, props in states :: {{ [string]: {{ [string]: any }} }} do local set = targets(props) sets[name] = set for o, p in set do local b = base[o] or {{}} base[o] = b for k in p do if b[k] == nil then b[k] = o[k] end end end end \
+for name, props in states :: {{ [string]: {{ [string]: any }} }} do local set = targets(props) sets[name] = set for o, p in set do if base[o] == nil then base[o] = {{}} mine[o] = {{}} moving[o] = {{}} end local b, m, mv = base[o], mine[o], moving[o] for k in p do if b[k] == nil then b[k] = o[k] o:GetPropertyChangedSignal(k):Connect(function() if busy or mv[k] ~= nil then return end local v = o[k] if v ~= m[k] then b[k] = v end end) end end end end \
 local function tweens(kind: string, k: string, v: any): boolean local t = typeof(v) if t ~= \"number\" and t ~= \"Color3\" and t ~= \"UDim2\" and t ~= \"UDim\" and t ~= \"Vector2\" and t ~= \"Vector3\" and t ~= \"Rect\" then return false end if kind == \"all\" then return true end local color = string.sub(k, -6) == \"Color3\" or k == \"Color\" local opacity = string.sub(k, -12) == \"Transparency\" local transform = k == \"Position\" or k == \"Size\" or k == \"Rotation\" or k == \"AnchorPoint\" or k == \"Scale\" if kind == \"colors\" then return color elseif kind == \"opacity\" then return opacity elseif kind == \"transform\" then return transform end return color or opacity or transform or k == \"Thickness\" end \
-local function apply(set: {{ [any]: {{ [string]: any }} }}) local tw = tween for o, props in set do local goal: {{ [string]: any }} = {{}} local moving = false for k, v in props do if tw ~= nil and tweens(tw.kind, k, v) then goal[k] = v moving = true else o[k] = v end end if moving and tw ~= nil then game:GetService(\"TweenService\"):Create(o, tw.info, goal):Play() end end end \
+local function apply(set: {{ [any]: {{ [string]: any }} }}) local tw = tween for o, props in set do local m, mv = mine[o], moving[o] local goal: {{ [string]: any }} = {{}} local moves = false for k, v in props do if tw ~= nil and tweens(tw.kind, k, v) then goal[k] = v moves = true else busy = true o[k] = v busy = false m[k] = o[k] end end if moves and tw ~= nil then local t = game:GetService(\"TweenService\"):Create(o, tw.info, goal) for k in goal do mv[k] = t end t.Completed:Connect(function() for k in goal do if mv[k] == t then mv[k] = nil m[k] = o[k] end end end) t:Play() end end end \
 local function reset() apply(base) end \
 local hover = sets.hover if hover ~= nil then local h = hover el.MouseEnter:Connect(function() apply(h) end) el.MouseLeave:Connect(reset) end \
 local active = sets.active if active ~= nil then local a = active el.MouseButton1Down:Connect(function() apply(a) end) el.MouseButton1Up:Connect(function() if hover ~= nil then apply(hover) else reset() end end) end \

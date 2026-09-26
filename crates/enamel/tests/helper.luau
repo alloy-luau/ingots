@@ -172,6 +172,58 @@ for _, mode in { "immediate", "deferred" } do
 		check(`{tag}: rest scale`, scale.Scale, 1)
 		check(`{tag}: rest thickness`, stroke.Thickness, 0)
 		check(`{tag}: rest color`, stroke.Color, 0)
+
+		-- A source drives BackgroundTransparency, and
+		-- hover:bg-transparency-90 changes it. The effect writes the
+		-- value of the source now and on each change, as Vide does.
+		local picked = false
+		local button = Instance("TextButton", {})
+		local function effect()
+			button.BackgroundTransparency = if picked then 0 else 1
+		end
+		effect()
+		flush()
+		__enamel(
+			button,
+			{ hover = { BackgroundTransparency = 0.9 } },
+			false,
+			if tween then TWEEN else nil
+		)
+
+		-- The source changes at rest, then the pointer comes and goes.
+		picked = true
+		effect()
+		flush()
+		button.MouseEnter:Fire()
+		settle()
+		check(`{tag}: hover over a source`, button.BackgroundTransparency, 0.9)
+		button.MouseLeave:Fire()
+		settle()
+		check(`{tag}: rest after a change at rest`, button.BackgroundTransparency, 0)
+
+		-- The source changes under the pointer, as a click does.
+		picked = false
+		effect()
+		flush()
+		button.MouseEnter:Fire()
+		settle()
+		picked = true
+		effect()
+		flush()
+		button.MouseLeave:Fire()
+		settle()
+		check(`{tag}: rest after a change on hover`, button.BackgroundTransparency, 0)
+
+		-- The steps of a tween are the helper's own writes.
+		button.MouseEnter:Fire()
+		flush()
+		step()
+		settle()
+		button.MouseLeave:Fire()
+		flush()
+		step()
+		settle()
+		check(`{tag}: rest after a plain hover`, button.BackgroundTransparency, 0)
 	end
 end
 
