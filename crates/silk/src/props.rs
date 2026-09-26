@@ -319,7 +319,11 @@ pub fn family(value: &str, fonts: &Fonts) -> String {
 /// The name RichText's `face` takes for a family file: the `Enum.Font`
 /// name where the file carries another.
 pub fn rich_face(url: &str) -> String {
-    let file = url.rsplit('/').next().unwrap_or(url).trim_end_matches(".json");
+    let file = url
+        .rsplit('/')
+        .next()
+        .unwrap_or(url)
+        .trim_end_matches(".json");
 
     match file {
         "SourceSansPro" => "SourceSans",
@@ -599,9 +603,22 @@ pub fn catalog() -> Vec<Known> {
 
 /// The text properties CSS inherits from a box to the text inside it.
 pub const INHERITED: &[&str] = &[
-    "color", "font", "font-family", "font-size", "font-style", "font-weight", "line-height",
-    "text-align", "text-transform", "white-space", "text-overflow", "vertical-align",
-    "text-decoration", "text-decoration-line", "font-variant", "font-variant-caps",
+    "color",
+    "font",
+    "font-family",
+    "font-size",
+    "font-style",
+    "font-weight",
+    "line-height",
+    "text-align",
+    "text-transform",
+    "white-space",
+    "text-overflow",
+    "vertical-align",
+    "text-decoration",
+    "text-decoration-line",
+    "font-variant",
+    "font-variant-caps",
 ];
 
 /// CSS properties that parse and set nothing on a Roblox instance.
@@ -684,7 +701,10 @@ pub fn apply(decls: &[Decl], ctx: &Ctx, out: &mut Out) {
             out.problem(
                 span,
                 "bad_value",
-                format!("`{}` names a variable no `:root` rule of this file sets", d.value.trim()),
+                format!(
+                    "`{}` names a variable no `:root` rule of this file sets",
+                    d.value.trim()
+                ),
             );
 
             continue;
@@ -1287,7 +1307,11 @@ pub fn apply(decls: &[Decl], ctx: &Ctx, out: &mut Out) {
             }
 
             "object-fit" | "background-size" | "image-rendering" if !ctx.target.has_image() => {
-                out.problem(d.name_span, "no_effect", format!("`{}` fits an image, and this element has none", d.name));
+                out.problem(
+                    d.name_span,
+                    "no_effect",
+                    format!("`{}` fits an image, and this element has none", d.name),
+                );
             }
 
             "object-fit" | "background-size" => {
@@ -1350,9 +1374,17 @@ fn roblox_value(name: &str, v: &str) -> String {
     // A length: a UDim where the property takes one, else its pixels.
     let udim = matches!(
         name,
-        "CornerRadius" | "PaddingTop" | "PaddingRight" | "PaddingBottom" | "PaddingLeft" | "Padding"
+        "CornerRadius"
+            | "PaddingTop"
+            | "PaddingRight"
+            | "PaddingBottom"
+            | "PaddingLeft"
+            | "Padding"
     );
-    let pair = matches!(name, "Size" | "Position" | "CellSize" | "CellPadding" | "CanvasSize");
+    let pair = matches!(
+        name,
+        "Size" | "Position" | "CellSize" | "CellPadding" | "CanvasSize"
+    );
 
     if let Some(l) = css::length(v) {
         return match (udim, pair) {

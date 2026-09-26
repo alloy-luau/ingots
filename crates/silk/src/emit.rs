@@ -79,7 +79,10 @@ fn void_findings(src: &str) -> Vec<Finding> {
 
     for (lt, _) in src.match_indices('<') {
         let rest = &src[lt + 1..];
-        let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
 
         if !VOID.contains(&name.as_str()) {
             continue;
@@ -565,7 +568,10 @@ impl<'a> Writer<'a> {
                 c.tag
                     .as_deref()
                     .filter(|t| t.starts_with(|ch: char| ch.is_ascii_uppercase()))
-                    .or(c.pseudo_element.as_deref().filter(|p| p.starts_with(|ch: char| ch.is_ascii_uppercase())))
+                    .or(c
+                        .pseudo_element
+                        .as_deref()
+                        .filter(|p| p.starts_with(|ch: char| ch.is_ascii_uppercase())))
             });
 
             if let Some(name) = named {
@@ -652,15 +658,19 @@ impl<'a> Writer<'a> {
 
             // An axis the rule leaves out takes the element's own: a box
             // is as wide as its parent, and an inline tag sizes to its text.
-            let inline = last
-                .tag
-                .as_deref()
-                .and_then(html::tag)
-                .is_some_and(|t| matches!(t.kind, Kind::Inline | Kind::Button | Kind::Link | Kind::Input));
+            let inline = last.tag.as_deref().and_then(html::tag).is_some_and(|t| {
+                matches!(
+                    t.kind,
+                    Kind::Inline | Kind::Button | Kind::Link | Kind::Input
+                )
+            });
             let base_width = match inline {
                 true => Axis::Auto,
 
-                false => Axis::Len(css::Len { scale: 1.0, offset: 0.0 }),
+                false => Axis::Len(css::Len {
+                    scale: 1.0,
+                    offset: 0.0,
+                }),
             };
 
             if let Some((size, auto)) = out.size((base_width, Axis::Auto)) {
@@ -1002,7 +1012,11 @@ impl<'a> Writer<'a> {
             !(enamel_text
                 && matches!(
                     k.as_str(),
-                    "TextSize" | "TextColor3" | "TextTransparency" | "TextXAlignment" | "TextWrapped"
+                    "TextSize"
+                        | "TextColor3"
+                        | "TextTransparency"
+                        | "TextXAlignment"
+                        | "TextWrapped"
                 ))
                 && !(enamel_font && k == "FontFace")
                 && !(enamel_leading && k == "LineHeight")
@@ -1261,7 +1275,10 @@ impl<'a> Writer<'a> {
                     self.find(
                         "unknown_attribute",
                         a.name_span,
-                        format!("Silk does not know `{}` on `<{}>`; it sets nothing", a.name, tag.name),
+                        format!(
+                            "Silk does not know `{}` on `<{}>`; it sets nothing",
+                            a.name, tag.name
+                        ),
                     );
                     self.remove_attr(a.span);
                 }
@@ -1618,8 +1635,14 @@ impl<'a> Writer<'a> {
             )];
 
             if button_row {
-                props.push(("FillDirection".into(), "Enum.FillDirection.Horizontal".into()));
-                props.push(("VerticalAlignment".into(), "Enum.VerticalAlignment.Center".into()));
+                props.push((
+                    "FillDirection".into(),
+                    "Enum.FillDirection.Horizontal".into(),
+                ));
+                props.push((
+                    "VerticalAlignment".into(),
+                    "Enum.VerticalAlignment.Center".into(),
+                ));
                 props.push(("Padding".into(), "UDim.new(0, 4)".into()));
             }
 
@@ -2025,7 +2048,10 @@ impl<'a> Writer<'a> {
         let (mut open, mut close) = match tag.name {
             // Code takes the project's monospace family.
             "code" | "kbd" | "samp" | "tt" => (
-                format!("<font face=\"{}\">", props::rich_face(&self.opts.fonts.mono)),
+                format!(
+                    "<font face=\"{}\">",
+                    props::rich_face(&self.opts.fonts.mono)
+                ),
                 "</font>".to_string(),
             ),
 
@@ -2309,9 +2335,13 @@ impl<'a> Writer<'a> {
             // In a row a run sizes to its text; in a stack it takes the
             // width and wraps.
             let size = match self.row_parents.contains(&i) {
-                true => "Size={UDim2.new()} AutomaticSize={Enum.AutomaticSize.XY} TextWrapped={false}",
+                true => {
+                    "Size={UDim2.new()} AutomaticSize={Enum.AutomaticSize.XY} TextWrapped={false}"
+                }
 
-                false => "Size={UDim2.fromScale(1, 0)} AutomaticSize={Enum.AutomaticSize.Y} TextWrapped={true}",
+                false => {
+                    "Size={UDim2.fromScale(1, 0)} AutomaticSize={Enum.AutomaticSize.Y} TextWrapped={true}"
+                }
             };
 
             if rich {
@@ -2561,7 +2591,9 @@ pub fn helper_at(source: &str) -> usize {
         // line's end; the prelude goes on the next line.
         let comment = at + skipped;
         let end = crate::markup::skip_comment(source, comment);
-        at = source[end..].find('\n').map_or(source.len(), |n| end + n + 1);
+        at = source[end..]
+            .find('\n')
+            .map_or(source.len(), |n| end + n + 1);
     }
 }
 
@@ -2823,18 +2855,35 @@ mod tests {
     /// S3, S4, S27, S28: the reports the manifest declares.
     #[test]
     fn at_rules_unknown_attributes_and_void_tags_report() {
-        assert!(lints("return <div><style>@media (x) { .a { color: red } }</style></div>\n").contains(&"unsupported_css".to_string()));
+        assert!(
+            lints("return <div><style>@media (x) { .a { color: red } }</style></div>\n")
+                .contains(&"unsupported_css".to_string())
+        );
 
         let src = "return <div><label htmlFor=\"n\">N</label><p onPointerDown={f}>x</p></div>\n";
         let out = silk(src);
-        assert!(!out.contains("htmlFor") && !out.contains("onPointerDown"), "{out}");
+        assert!(
+            !out.contains("htmlFor") && !out.contains("onPointerDown"),
+            "{out}"
+        );
         assert!(lints(src).contains(&"unknown_attribute".to_string()));
 
         assert!(lints("return <p>a<br>b</p>\n").contains(&"void_tag".to_string()));
 
-        let opts = Options { roblox: false, ..Options::default() };
-        let f = run("return <div><style>.x > UIListLayout { gap: 4px }</style></div>\n", "a.alx", &opts);
-        assert!(f.findings.iter().any(|f| f.lint == "roblox_instance"), "{:?}", f.findings);
+        let opts = Options {
+            roblox: false,
+            ..Options::default()
+        };
+        let f = run(
+            "return <div><style>.x > UIListLayout { gap: 4px }</style></div>\n",
+            "a.alx",
+            &opts,
+        );
+        assert!(
+            f.findings.iter().any(|f| f.lint == "roblox_instance"),
+            "{:?}",
+            f.findings
+        );
     }
 
     /// S5: the prelude goes after a leading block comment.
@@ -2842,16 +2891,31 @@ mod tests {
     fn the_prelude_follows_a_block_comment() {
         let src = "--[[\n    The shop.\n]]\nreturn <div className=\"x\"><p>a</p></div>\n";
         let out = silk(src);
-        assert!(out.starts_with("--[[\n    The shop.\n]]\nlocal function __silk("), "{out}");
+        assert!(
+            out.starts_with("--[[\n    The shop.\n]]\nlocal function __silk("),
+            "{out}"
+        );
     }
 
     /// S7: text CSS on a box reaches the text inside it.
     #[test]
     fn text_css_on_a_box_is_inherited() {
-        let out = silk("return <div style={{ textAlign = \"center\", color = \"red\" }}><p>a</p></div>\n");
-        assert!(out.starts_with("return <Frame") && !out[..out.find("<TextLabel").unwrap()].contains("TextXAlignment"), "{out}");
-        assert!(out.contains("TextXAlignment={Enum.TextXAlignment.Center}"), "{out}");
-        assert!(out.contains("TextColor3={Color3.fromRGB(255, 0, 0)}"), "{out}");
+        let out = silk(
+            "return <div style={{ textAlign = \"center\", color = \"red\" }}><p>a</p></div>\n",
+        );
+        assert!(
+            out.starts_with("return <Frame")
+                && !out[..out.find("<TextLabel").unwrap()].contains("TextXAlignment"),
+            "{out}"
+        );
+        assert!(
+            out.contains("TextXAlignment={Enum.TextXAlignment.Center}"),
+            "{out}"
+        );
+        assert!(
+            out.contains("TextColor3={Color3.fromRGB(255, 0, 0)}"),
+            "{out}"
+        );
     }
 
     /// S8: the React form of a style reads the string.
@@ -2880,17 +2944,26 @@ mod tests {
     fn a_row_sizes_its_children_to_their_content() {
         let out = silk("return <div style={{ display = \"flex\" }}><p>a</p><p>b</p></div>\n");
         assert!(!out.contains("<TextLabel Name={\"p\"} BorderSizePixel={0} BackgroundTransparency={1} TextColor3={Color3.fromRGB(0, 0, 0)} TextSize={16} TextWrapped={true} TextXAlignment={Enum.TextXAlignment.Left} TextYAlignment={Enum.TextYAlignment.Top} Size={UDim2.fromScale(1, 0)}"), "{out}");
-        assert!(out.contains("AutomaticSize={Enum.AutomaticSize.XY}"), "{out}");
+        assert!(
+            out.contains("AutomaticSize={Enum.AutomaticSize.XY}"),
+            "{out}"
+        );
 
         let out = silk("return <button><img src=\"x\" /> Buy</button>\n");
-        assert!(out.contains("FillDirection={Enum.FillDirection.Horizontal}"), "{out}");
+        assert!(
+            out.contains("FillDirection={Enum.FillDirection.Horizontal}"),
+            "{out}"
+        );
         assert!(out.contains("> Buy</TextLabel>"), "{out}");
     }
 
     /// S16, S17, S23, S33: Enamel's classes and a written background.
     #[test]
     fn enamel_and_written_properties_keep_the_right_defaults() {
-        let opts = Options { enamel: true, ..Options::default() };
+        let opts = Options {
+            enamel: true,
+            ..Options::default()
+        };
         let text = |src: &str| apply(src, &run(src, "a.alx", &opts).edits);
 
         let out = text("return <div className=\"hover:bg-red-500\"><p>a</p></div>\n");
@@ -2912,9 +2985,17 @@ mod tests {
     /// S13, S14, S26, S29: values and orders.
     #[test]
     fn roblox_values_media_and_table_order() {
-        let out = silk("return <div><style>.b { BackgroundColor3: rgba(0, 0, 0, 0.5); TextSize: 14px; CornerRadius: 4px }</style></div>\n");
-        assert!(out.contains("BackgroundColor3 = Color3.fromRGB(0, 0, 0)"), "{out}");
-        assert!(out.contains("TextSize = 14,") || out.contains("TextSize = 14 "), "{out}");
+        let out = silk(
+            "return <div><style>.b { BackgroundColor3: rgba(0, 0, 0, 0.5); TextSize: 14px; CornerRadius: 4px }</style></div>\n",
+        );
+        assert!(
+            out.contains("BackgroundColor3 = Color3.fromRGB(0, 0, 0)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("TextSize = 14,") || out.contains("TextSize = 14 "),
+            "{out}"
+        );
         assert!(out.contains("CornerRadius = UDim.new(0, 4)"), "{out}");
 
         let out = silk("return <p style={{ TextSize = 20 }}>a</p>\n");
@@ -2923,8 +3004,13 @@ mod tests {
         let out = silk("return <video muted />\n");
         assert!(out.contains("Volume={0}"), "{out}");
 
-        let out = silk("return <table><tbody><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></tbody></table>\n");
-        assert!(out.contains("<Frame Name={\"tr\"}") && out.contains("LayoutOrder={2}"), "{out}");
+        let out = silk(
+            "return <table><tbody><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></tbody></table>\n",
+        );
+        assert!(
+            out.contains("<Frame Name={\"tr\"}") && out.contains("LayoutOrder={2}"),
+            "{out}"
+        );
     }
 
     #[test]

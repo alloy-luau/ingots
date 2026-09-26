@@ -395,9 +395,10 @@ pub fn parse_table(text: &str, base: usize) -> (Vec<Decl>, Vec<Problem>) {
             .trim_matches(|c| c == '"' || c == '\'');
         // A Roblox property keeps its name; `WebkitTextStroke` is a
         // vendor prefix.
-        let vendor = ["Webkit", "Moz", "Ms", "O"]
-            .iter()
-            .any(|p| key.strip_prefix(p).is_some_and(|r| r.starts_with(|c: char| c.is_ascii_uppercase())));
+        let vendor = ["Webkit", "Moz", "Ms", "O"].iter().any(|p| {
+            key.strip_prefix(p)
+                .is_some_and(|r| r.starts_with(|c: char| c.is_ascii_uppercase()))
+        });
         let name = match is_roblox_name(key) && !vendor {
             true => key.to_string(),
 
