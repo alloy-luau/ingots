@@ -113,14 +113,20 @@ with no Roblox form are `unsupported_tag` errors.
 | `width`, `height` on media | `Size` |
 | `placeholder`, `value`, `readOnly`, `disabled` | `PlaceholderText`, `Text`, `TextEditable`, `Interactable` |
 | `autoPlay`, `loop`, `muted` | `Playing`, `Looped`, `Volume` |
-| `onClick`, `onMouseEnter`, `onMouseLeave`, `onMouseDown`, `onMouseUp`, `onMouseMove`, `onContextMenu`, `onFocus`, `onBlur`, `onChange`, `onKeyDown`, `onKeyUp` | `Activated`, `MouseEnter`, `MouseLeave`, `MouseButton1Down`, `MouseButton1Up`, `MouseMoved`, `MouseButton2Click`, `Focused`, `FocusLost`, `FocusLost`, `InputBegan`, `InputEnded` |
+| `onClick`, `onMouseEnter`, `onMouseLeave`, `onMouseDown`, `onMouseUp`, `onMouseMove`, `onContextMenu`, `onFocus`, `onBlur`, `onKeyDown`, `onKeyUp` | `Activated`, `MouseEnter`, `MouseLeave`, `MouseButton1Down`, `MouseButton1Up`, `MouseMoved`, `MouseButton2Click`, `Focused`, `FocusLost`, `InputBegan`, `InputEnded` |
+| `onChange`, `onInput`, `maxLength` on a text input | a listener on `Text` that the helper connects |
+
+`onChange` and `onInput` run on each key, as React runs `onChange`. The
+handler takes the new text, so a source works as one:
+`<input onChange={name} />` writes into `name`. `maxLength` cuts the text
+to that many characters. `onBlur` runs when the input loses the focus.
 
 `hidden`, `readOnly`, and `disabled` negate their value. A source stays
 live: `disabled={busy}` writes a function that reads `busy`, so the
 button follows it.
 
 `aria-*`, `data-*`, `alt`, and the other attributes with nothing behind
-them drop without a word. `title`, `maxLength`, `colSpan`, and a few
+them drop without a word. `title`, `minLength`, `colSpan`, and a few
 others drop with a `no_effect` warning.
 
 ## CSS
@@ -218,9 +224,10 @@ shows its swatch.
 
 ## Limits
 
-- Tags and links need a target whose elements are instances, as Vide and
-  Fusion build them: the helper calls `AddTag` and connects `Activated` on
-  the element. On React, set `tags = false`.
+- Tags, links, `onChange`, and `maxLength` need a target whose elements
+  are instances, as Vide and Fusion build them: the helper calls `AddTag`
+  and connects `Activated` and the `Text` signal on the element. On
+  React, set `tags = false`.
 - A StyleRule overrides a property set on the instance. So a `<style>`
   rule wins over a `style` table, which is the reverse of CSS.
 - A rule sets `Size` and `FontFace` whole. A rule with `width` alone takes

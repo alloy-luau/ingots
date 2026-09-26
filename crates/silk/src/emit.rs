@@ -1283,6 +1283,8 @@ impl<'a> Writer<'a> {
         let mut name_from_id = false;
         let mut tags_expr: Option<String> = None;
         let mut href: Option<String> = None;
+        let mut change: Option<String> = None;
+        let mut limit: Option<String> = None;
 
         for a in &e.attrs {
             if let Some(react) = html::react_name(&a.name) {
@@ -1420,6 +1422,16 @@ impl<'a> Writer<'a> {
                             Raw::Bare => {}
                         }
 
+                        self.remove_attr(a.span);
+                    }
+
+                    n if html::is_change(n) => {
+                        change = Some(raw.luau());
+                        self.remove_attr(a.span);
+                    }
+
+                    n if n.eq_ignore_ascii_case("maxlength") => {
+                        limit = Some(raw.luau().trim_matches('"').to_string());
                         self.remove_attr(a.span);
                     }
 
@@ -1902,9 +1914,20 @@ impl<'a> Writer<'a> {
 
         let tags = tags.filter(|_| self.opts.tags);
 
-        if tags.is_some() || href.is_some() {
+        if tags.is_some() || href.is_some() || change.is_some() || limit.is_some() {
             self.uses_helper = true;
             let (open, close) = self.hole_braces(i);
+            let nil = || "nil".to_string();
+            // A change handler and a limit ride after the tags and the link.
+            let input = match (&change, &limit) {
+                (None, None) => String::new(),
+
+                _ => format!(
+                    ", {}, {}",
+                    change.clone().unwrap_or_else(nil),
+                    limit.clone().unwrap_or_else(nil)
+                ),
+            };
             // The element builds inside a function the helper calls once:
             // the markup compiler reads markup outside a function in a
             // child as a condition that never updates.
@@ -1917,9 +1940,9 @@ impl<'a> Writer<'a> {
                 e.end,
                 RANK_WRAP_CLOSE,
                 format!(
-                    " end, {}, {}){close}",
-                    tags.unwrap_or_else(|| "nil".into()),
-                    href.unwrap_or_else(|| "nil".into())
+                    " end, {}, {}{input}){close}",
+                    tags.unwrap_or_else(nil),
+                    href.unwrap_or_else(nil)
                 ),
             );
         }
@@ -2749,16 +2772,21 @@ fn pad(original: &str, mut text: String) -> String {
     text
 }
 
-/// The helper as one line of Alloy: it tags an element and connects a
-/// link. A link finds its target by `Name` from the top of its UI tree,
+/// The helper as one line of Alloy: it tags an element, connects a link,
+/// and listens to the text of an input for `onChange` and `maxLength`,
+/// as React runs `onChange` on each key. A link finds its target by `Name` from the top of its UI tree,
 /// as `#id` finds an element in the document, and scrolls the target's
 /// nearest ScrollingFrame to it; `#` scrolls the link's own to the top.
 /// The helper needs a target whose elements are instances, as Vide and
 /// Fusion build them.
 pub fn helper_text(helper: &str) -> String {
     format!(
-        "local function {helper}(make: () -> any, tags: string?, href: string?): any \
+        "local function {helper}(make: () -> any, tags: string?, href: string?, change: any, limit: number?): any \
 local el = make() \
+if change ~= nil or limit ~= nil then local call: any = change el:GetPropertyChangedSignal(\"Text\"):Connect(function() \
+local cut = if limit ~= nil then utf8.offset(el.Text, limit + 1) else nil \
+if cut ~= nil and cut <= #el.Text then el.Text = string.sub(el.Text, 1, cut - 1) return end \
+if change ~= nil then call(el.Text) end end) end \
 if tags ~= nil then for tag in string.gmatch(tags, \"%S+\") do el:AddTag(tag) end end \
 if href ~= nil then el.Activated:Connect(function() \
 local root = el while root.Parent ~= nil and root.Parent:IsA(\"GuiBase2d\") do root = root.Parent end \
@@ -3433,6 +3461,29 @@ mod tests {
         let out =
             with_enamel("return <button className=\"p-2 rounded-xl border-0\">{x}</button>\n");
         assert!(out.contains("Text={x}"), "{out}");
+    }
+
+    /// Game UI 19: `onChange` runs on each key with the text, as React
+    /// runs it, and `maxLength` cuts the text.
+    #[test]
+    fn on_change_runs_on_each_key() {
+        let out = silk("return <input maxLength={24} onChange={f} />\n");
+        assert!(
+            out.contains("return __silk(function() return <TextBox"),
+            "{out}"
+        );
+        assert!(out.contains(" end, nil, nil, f, 24)"), "{out}");
+        assert!(
+            !out.contains("FocusLost") && !out.contains("maxLength"),
+            "{out}"
+        );
+        assert!(out.contains("GetPropertyChangedSignal(\"Text\")"), "{out}");
+
+        let out = silk("return <textarea onInput={name} className=\"x\"></textarea>\n");
+        assert!(out.contains(" end, \"x\", nil, name, nil)"), "{out}");
+
+        assert!(lints("return <div onChange={f}></div>\n").contains(&"no_effect".to_string()));
+        assert!(!lints("return <input maxLength=\"4\" />\n").contains(&"no_effect".to_string()));
     }
 
     /// Game UI 12: a classed child on the line of its box compiles as it

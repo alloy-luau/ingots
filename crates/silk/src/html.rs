@@ -613,12 +613,6 @@ const EVENTS: &[(&str, &str, &str, &str)] = &[
         "fires when a TextBox loses the focus",
     ),
     (
-        "onchange",
-        "onChange",
-        "FocusLost",
-        "fires when a TextBox commits: it loses the focus",
-    ),
-    (
         "onkeydown",
         "onKeyDown",
         "InputBegan",
@@ -632,10 +626,26 @@ const EVENTS: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
+/// The handlers that run on each change of a text input, as React runs
+/// `onChange`. Roblox has no event for them; the helper listens to
+/// `Text` and passes the new text.
+const CHANGES: &[(&str, &str)] = &[("onchange", "onChange"), ("oninput", "onInput")];
+
+/// What a change handler does, for the editor.
+pub const CHANGE_DOC: &str =
+    "runs on each change of the text, with the new text: `function(text) ... end` or a source";
+
+/// What `maxLength` does, for the editor.
+const MAX_LENGTH_DOC: &str = "the most characters the text holds; the helper cuts the rest";
+
+/// Whether an attribute is a change handler: `onChange` or `onInput`.
+pub fn is_change(name: &str) -> bool {
+    CHANGES.iter().any(|(l, _)| name.eq_ignore_ascii_case(l))
+}
+
 /// React events with no Roblox event behind them.
 const NO_EVENTS: &[(&str, &str)] = &[
     ("ondblclick", "onDoubleClick"),
-    ("oninput", "onInput"),
     ("onsubmit", "onSubmit"),
     ("onwheel", "onWheel"),
     ("onscroll", "onScroll"),
@@ -690,6 +700,7 @@ pub fn react_name(name: &str) -> Option<&'static str> {
         .iter()
         .copied()
         .chain(EVENTS.iter().map(|(l, r, ..)| (*l, *r)))
+        .chain(CHANGES.iter().copied())
         .chain(NO_EVENTS.iter().copied())
         .find(|(l, _)| *l == name)
         .map(|(_, r)| r)
@@ -759,7 +770,9 @@ pub fn attributes(tag: &Tag, input_type: Option<&str>) -> Vec<(&'static str, &'s
                     "disabled",
                     "`TextEditable={false}` and `Interactable={false}`",
                 ),
-                ("maxLength", "nothing: a TextBox has no limit"),
+                ("maxLength", MAX_LENGTH_DOC),
+                ("onChange", CHANGE_DOC),
+                ("onInput", CHANGE_DOC),
             ],
         },
 
@@ -773,6 +786,9 @@ pub fn attributes(tag: &Tag, input_type: Option<&str>) -> Vec<(&'static str, &'s
             ),
             ("rows", "the height of `Size`"),
             ("cols", "the width of `Size`"),
+            ("maxLength", MAX_LENGTH_DOC),
+            ("onChange", CHANGE_DOC),
+            ("onInput", CHANGE_DOC),
         ],
 
         Button => &[
@@ -848,6 +864,20 @@ pub fn map(tag: &Tag, name: &str, value: Raw, input_type: Option<&str>, helper: 
 
     if let Some((event, _)) = event(&lower) {
         return Mapped::Event(event);
+    }
+
+    if is_change(&lower) {
+        let text = match tag.kind {
+            Input => !matches!(input_type, Some("button" | "submit" | "reset")),
+
+            _ => tag.kind == TextArea,
+        };
+
+        return match text {
+            true => Mapped::Read,
+
+            false => Mapped::NoEffect("only a text input changes as the player types"),
+        };
     }
 
     if NO_EVENTS.iter().any(|(l, _)| *l == lower) {
@@ -935,12 +965,13 @@ pub fn map(tag: &Tag, name: &str, value: Raw, input_type: Option<&str>, helper: 
 
         (Text, "value") if tag.name == "li" => Mapped::Read,
 
+        (Input | TextArea, "maxlength") => Mapped::Read,
+
         (
             Input | TextArea,
-            "maxlength" | "minlength" | "pattern" | "required" | "min" | "max" | "step" | "name"
-            | "autocomplete" | "form" | "size" | "list" | "inputmode" | "spellcheck"
-            | "autocapitalize",
-        ) => Mapped::NoEffect("a TextBox checks nothing the player types; check it in the handler"),
+            "minlength" | "pattern" | "required" | "min" | "max" | "step" | "name" | "autocomplete"
+            | "form" | "size" | "list" | "inputmode" | "spellcheck" | "autocapitalize",
+        ) => Mapped::NoEffect("a TextBox checks nothing the player types; check it in `onChange`"),
 
         (Button, "type" | "name" | "form" | "formaction" | "formmethod" | "popovertarget") => {
             Mapped::Drop
