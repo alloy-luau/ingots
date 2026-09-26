@@ -270,6 +270,10 @@ writes `AutomaticSize`, so Silk passes its own automatic axis on as a
 class: `<div className="w-full">` keeps its automatic height as
 `w-full h-auto`.
 
+An overflow class makes the box a ScrollingFrame, as `overflow: auto`
+does: `overflow-y-auto` scrolls down, `overflow-x-auto` sideways, and
+`overflow-auto` both ways. The canvas grows with the content.
+
 Every class also becomes a tag, so `.card` in a `<style>` still
 matches. In the editor, Enamel completes and explains its utilities in
 `className`, and does not report a class it does not know on an HTML

@@ -1436,7 +1436,20 @@ impl<'a> Writer<'a> {
             self.find(p.lint, p.span, p.message);
         }
 
-        let scroll = style.scroll.or(statics.scroll);
+        // An Enamel class that scrolls, `overflow-y-auto`, makes the box a
+        // ScrollingFrame too.
+        let enamel_scroll = match self.opts.enamel {
+            true => crate::enamel::scroll(
+                ["class", "className"]
+                    .iter()
+                    .filter_map(|n| e.text(src, n))
+                    .flat_map(str::split_whitespace),
+                &self.opts.theme,
+            ),
+
+            false => None,
+        };
+        let scroll = style.scroll.or(statics.scroll).or(enamel_scroll);
 
         if scroll.is_some() && class == "Frame" {
             class = "ScrollingFrame";
@@ -4577,6 +4590,28 @@ mod tests {
         // `position: relative` with no offset flows.
         let out = silk("return <div><p style={{ position = \"relative\" }}>a</p><p>b</p></div>\n");
         assert!(out.contains("UIListLayout"), "{out}");
+    }
+
+    /// An Enamel overflow class makes a ScrollingFrame whose canvas
+    /// grows with its content, as `overflow: auto` in CSS does.
+    #[test]
+    fn an_overflow_class_scrolls() {
+        let out = with_enamel(
+            "return <div className=\"w-full h-[400px] overflow-y-auto flex flex-wrap gap-4\"><p>a</p></div>\n",
+        );
+
+        assert!(out.contains("<ScrollingFrame Name={\"div\"}"), "{out}");
+        assert!(
+            out.contains("ScrollingDirection={Enum.ScrollingDirection.Y} CanvasSize={UDim2.new()} AutomaticCanvasSize={Enum.AutomaticSize.Y}"),
+            "{out}"
+        );
+        assert!(out.contains("</ScrollingFrame>"), "{out}");
+
+        // Enamel's own direction class wins over Silk's.
+        let out =
+            with_enamel("return <div className=\"h-10 overflow-auto scroll-x\"><p>a</p></div>\n");
+        assert!(out.contains("<ScrollingFrame"), "{out}");
+        assert!(!out.contains("ScrollingDirection="), "{out}");
     }
 
     #[test]

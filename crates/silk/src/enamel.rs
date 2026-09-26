@@ -78,6 +78,37 @@ fn add(class: &str, theme: &Theme, depth: usize, out: &mut HashSet<String>) {
     }
 }
 
+/// The direction an overflow class scrolls, `overflow-y-auto` down and
+/// `overflow-auto` both ways, or `None` when no class scrolls. A class of
+/// the theme scrolls as its utilities do.
+pub fn scroll<'a>(
+    classes: impl IntoIterator<Item = &'a str>,
+    theme: &Theme,
+) -> Option<&'static str> {
+    fn find(class: &str, theme: &Theme, depth: usize) -> Option<&'static str> {
+        if has_variant(class) {
+            return None;
+        }
+
+        if let Some(ThemeClass::Utilities(list)) = theme.get(class) {
+            return list
+                .iter()
+                .rev()
+                .filter(|_| depth < 8)
+                .find_map(|c| find(c, theme, depth + 1));
+        }
+
+        match class {
+            "overflow-auto" | "overflow-scroll" | "scroll-xy" => Some("XY"),
+            "overflow-y-auto" | "overflow-y-scroll" | "scroll-y" => Some("Y"),
+            "overflow-x-auto" | "overflow-x-scroll" | "scroll-x" => Some("X"),
+            _ => None,
+        }
+    }
+
+    classes.into_iter().filter_map(|c| find(c, theme, 0)).last()
+}
+
 /// The classes of the text of an `enamel.aly`: the `classes` table it
 /// exports or returns. A string holds utilities, and a table holds
 /// properties.
@@ -245,7 +276,7 @@ fn utility(base: &str) -> &'static [&'static str] {
             &["ClipsDescendants"]
         }
         "overflow-auto" | "overflow-scroll" | "overflow-y-auto" | "overflow-y-scroll"
-        | "no-scroll" => &["ScrollingEnabled"],
+        | "overflow-x-auto" | "overflow-x-scroll" | "no-scroll" => &["ScrollingEnabled"],
         "scroll-x" | "scroll-y" | "scroll-xy" => &["ScrollingDirection"],
         "truncate" | "text-ellipsis" | "text-clip" => &["TextTruncate"],
         "text-wrap" | "text-nowrap" | "whitespace-normal" | "whitespace-nowrap" => &["TextWrapped"],
