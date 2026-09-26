@@ -40,7 +40,8 @@ connects `MouseEnter` and `MouseLeave`.
 | `w-[200px]`, `bg-[#ff0000]`, `text-[14px]` | arbitrary values |
 
 A `transition` makes each state change a tween: 150ms, Quad in-out,
-over the colors, the transparencies, position, size, and rotation.
+over the colors, the transparencies, position, size, rotation, scale,
+and stroke width.
 `transition-colors`, `transition-opacity`, `transition-transform`, and
 `transition-all` narrow or widen that. `duration-*` and `delay-*` take
 milliseconds, or a bracket time with a unit, `[0.3s]`. `ease-*` names a
@@ -48,6 +49,13 @@ Roblox easing style, `ease-back`, `ease-bounce`, `ease-expo`, with
 `-in`, `-out`, or `-in-out` behind it; `ease-in`, `ease-out`, and
 `ease-in-out` are Quad. A property a tween cannot move, a font or a
 boolean, is set at once.
+
+A state changes a property of the element, and also a scale or a
+stroke: `hover:scale-110`, `hover:ring-4`, and `hover:stroke-yellow-400`
+change the UIScale or the UIStroke child. With no such class at rest,
+the child starts at a scale of 1 or a stroke of no width, as in
+Tailwind. A padding, a layout, or a corner cannot change with a state,
+and the `no_effect` lint says so.
 
 A margin, a shadow, or a cursor has no property on a GuiObject: the
 class parses and the `no_effect` lint says so. A text utility on a

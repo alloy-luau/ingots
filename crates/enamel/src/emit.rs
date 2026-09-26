@@ -133,19 +133,23 @@ impl Plan<'_> {
 }
 
 /// The helper as one line of Alloy, so the file keeps its line count.
+/// A table value in a state holds the properties of a child, `UIScale`
+/// or `UIStroke`, which the helper finds by its class.
 pub fn helper_text(helper: &str) -> String {
     format!(
         "local function {helper}(el: any, states: {{ hover: {{ [string]: any }}?, active: {{ [string]: any }}?, focus: {{ [string]: any }}?, group_hover: {{ [string]: any }}? }}, group: boolean, tween: {{ kind: string, info: TweenInfo }}?): any \
-local base: {{ [string]: any }} = {{}} \
-for _, props in states :: {{ [string]: {{ [string]: any }} }} do for k in props do if base[k] == nil then base[k] = el[k] end end end \
-local function tweens(kind: string, k: string, v: any): boolean local t = typeof(v) if t ~= \"number\" and t ~= \"Color3\" and t ~= \"UDim2\" and t ~= \"UDim\" and t ~= \"Vector2\" and t ~= \"Vector3\" and t ~= \"Rect\" then return false end if kind == \"all\" then return true end local color = string.sub(k, -6) == \"Color3\" local opacity = string.sub(k, -12) == \"Transparency\" local transform = k == \"Position\" or k == \"Size\" or k == \"Rotation\" or k == \"AnchorPoint\" if kind == \"colors\" then return color elseif kind == \"opacity\" then return opacity elseif kind == \"transform\" then return transform end return color or opacity or transform end \
-local function apply(props: {{ [string]: any }}) local tw = tween if tw == nil then for k, v in props do el[k] = v end return end local goal: {{ [string]: any }} = {{}} local moving = false for k, v in props do if tweens(tw.kind, k, v) then goal[k] = v moving = true else el[k] = v end end if moving then game:GetService(\"TweenService\"):Create(el, tw.info, goal):Play() end end \
+local function targets(props: {{ [string]: any }}): {{ [any]: {{ [string]: any }} }} local out: {{ [any]: {{ [string]: any }} }} = {{ [el] = {{}} }} for k, v in props do if type(v) == \"table\" then local c = el:FindFirstChildOfClass(k) if c ~= nil then out[c] = v end else out[el][k] = v end end return out end \
+local base: {{ [any]: {{ [string]: any }} }} = {{}} \
+local sets: {{ [string]: {{ [any]: {{ [string]: any }} }} }} = {{}} \
+for name, props in states :: {{ [string]: {{ [string]: any }} }} do local set = targets(props) sets[name] = set for o, p in set do local b = base[o] or {{}} base[o] = b for k in p do if b[k] == nil then b[k] = o[k] end end end end \
+local function tweens(kind: string, k: string, v: any): boolean local t = typeof(v) if t ~= \"number\" and t ~= \"Color3\" and t ~= \"UDim2\" and t ~= \"UDim\" and t ~= \"Vector2\" and t ~= \"Vector3\" and t ~= \"Rect\" then return false end if kind == \"all\" then return true end local color = string.sub(k, -6) == \"Color3\" or k == \"Color\" local opacity = string.sub(k, -12) == \"Transparency\" local transform = k == \"Position\" or k == \"Size\" or k == \"Rotation\" or k == \"AnchorPoint\" or k == \"Scale\" if kind == \"colors\" then return color elseif kind == \"opacity\" then return opacity elseif kind == \"transform\" then return transform end return color or opacity or transform or k == \"Thickness\" end \
+local function apply(set: {{ [any]: {{ [string]: any }} }}) local tw = tween for o, props in set do local goal: {{ [string]: any }} = {{}} local moving = false for k, v in props do if tw ~= nil and tweens(tw.kind, k, v) then goal[k] = v moving = true else o[k] = v end end if moving and tw ~= nil then game:GetService(\"TweenService\"):Create(o, tw.info, goal):Play() end end end \
 local function reset() apply(base) end \
-local hover = states.hover if hover ~= nil then local h = hover el.MouseEnter:Connect(function() apply(h) end) el.MouseLeave:Connect(reset) end \
-local active = states.active if active ~= nil then local a = active el.MouseButton1Down:Connect(function() apply(a) end) el.MouseButton1Up:Connect(function() if hover ~= nil then apply(hover) else reset() end end) end \
-local focus = states.focus if focus ~= nil then local f = focus el.Focused:Connect(function() apply(f) end) el.FocusLost:Connect(reset) end \
+local hover = sets.hover if hover ~= nil then local h = hover el.MouseEnter:Connect(function() apply(h) end) el.MouseLeave:Connect(reset) end \
+local active = sets.active if active ~= nil then local a = active el.MouseButton1Down:Connect(function() apply(a) end) el.MouseButton1Up:Connect(function() if hover ~= nil then apply(hover) else reset() end end) end \
+local focus = sets.focus if focus ~= nil then local f = focus el.Focused:Connect(function() apply(f) end) el.FocusLost:Connect(reset) end \
 if group then el:SetAttribute(\"enamel_group\", true) end \
-local group_hover = states.group_hover if group_hover ~= nil then local gh = group_hover task.defer(function() local g = el.Parent while g ~= nil and g:GetAttribute(\"enamel_group\") == nil do g = g.Parent end if g ~= nil then g.MouseEnter:Connect(function() apply(gh) end) g.MouseLeave:Connect(reset) end end) end \
+local group_hover = sets.group_hover if group_hover ~= nil then local gh = group_hover task.defer(function() local g = el.Parent while g ~= nil and g:GetAttribute(\"enamel_group\") == nil do g = g.Parent end if g ~= nil then g.MouseEnter:Connect(function() apply(gh) end) g.MouseLeave:Connect(reset) end end) end \
 return el end "
     )
 }
@@ -227,6 +231,33 @@ mod tests {
         let out = apply(src, &plan.edits("__enamel"));
         assert!(out.contains(", false, { kind = \"default\", info = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut, 0, false, 0) })}"), "{out}");
         assert!(helper_text("__enamel").contains("TweenService"));
+    }
+
+    /// The helper runs under `luau` against the mock element of
+    /// `tests/helper.luau`. A machine without `luau` skips the run.
+    #[test]
+    fn the_helper_runs_against_a_mock_element() {
+        let script = format!(
+            "{}\n{}",
+            helper_text("__enamel"),
+            include_str!("../tests/helper.luau")
+        );
+        let path = std::env::temp_dir().join(format!("enamel-helper-{}.luau", std::process::id()));
+        std::fs::write(&path, script).unwrap();
+        let run = std::process::Command::new("luau").arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        let Ok(out) = run else {
+            eprintln!("no luau on PATH: the helper run is skipped");
+
+            return;
+        };
+
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]

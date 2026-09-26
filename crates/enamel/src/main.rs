@@ -317,11 +317,12 @@ impl Handler for Enamel {
                             needs.word()
                         ),
                     ),
+                    // Enamel knows the class, so the report is no_effect.
                     Problem::VariantNeedsProperty => Finding::new(
-                        "unknown_class",
+                        "no_effect",
                         span,
                         format!(
-                            "`{token}` adds a child or a marker; only a property can change with a state"
+                            "`{token}` sets nothing: a layout child or a marker cannot change with a state; a property, a scale, or a stroke can"
                         ),
                     ),
                 };

@@ -2142,6 +2142,9 @@ pub fn resolve(element: Element, classes: &[Class], ctx: &Context) -> Resolved {
     let mut flex: BTreeMap<&'static str, String> = BTreeMap::new();
     let mut font: BTreeMap<&'static str, String> = BTreeMap::new();
     let mut state_fonts: BTreeMap<&'static str, BTreeMap<&'static str, String>> = BTreeMap::new();
+    // The child properties a state changes, by state and child class.
+    let mut state_children: BTreeMap<(&'static str, &'static str), BTreeMap<&'static str, String>> =
+        BTreeMap::new();
     let mut transition = None;
     let mut duration = None;
     let mut ease = None;
@@ -2180,9 +2183,29 @@ pub fn resolve(element: Element, classes: &[Class], ctx: &Context) -> Resolved {
                         }
                     }
 
+                    // The helper finds the child by its class and sets
+                    // the property there.
+                    Piece::Scale(n) => {
+                        state_children
+                            .entry((state, "UIScale"))
+                            .or_default()
+                            .insert("Scale", num(n));
+                    }
+
+                    Piece::Stroke(k, v) => {
+                        state_children
+                            .entry((state, "UIStroke"))
+                            .or_default()
+                            .insert(k, v);
+                    }
+
                     Piece::NoEffect(what) => out.problems.push((i, Problem::NoEffect(what))),
 
                     Piece::Theme => out.uses_theme = true,
+
+                    // One report for the class, not one for each side
+                    // of a padding.
+                    _ if out.problems.contains(&(i, Problem::VariantNeedsProperty)) => {}
 
                     _ => out.problems.push((i, Problem::VariantNeedsProperty)),
                 }
@@ -2533,6 +2556,30 @@ pub fn resolve(element: Element, classes: &[Class], ctx: &Context) -> Resolved {
             class: "UICorner",
             props: vec![("CornerRadius".to_string(), d.luau())],
         });
+    }
+
+    // A state that changes a stroke or a scale needs the child at rest:
+    // a stroke of no width and a scale of 1, as in Tailwind.
+    for ((state, class), props) in &state_children {
+        match *class {
+            "UIStroke" if stroke.is_empty() => {
+                stroke.insert("Thickness", "0".into());
+            }
+
+            "UIScale" if scale.is_none() => scale = Some(1.0),
+
+            _ => {}
+        }
+
+        let fields = props
+            .iter()
+            .map(|(k, v)| format!("{k} = {v}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.states
+            .entry(state)
+            .or_default()
+            .push(((*class).to_string(), format!("{{ {fields} }}")));
     }
 
     if gui && !stroke.is_empty() {
@@ -3414,6 +3461,57 @@ mod tests {
                 .iter()
                 .any(|(i, p)| *i == 5 && matches!(p, Problem::Unknown))
         );
+    }
+
+    /// A state changes a scale or a stroke through the child. With no
+    /// class at rest, the child starts at no width and a scale of 1.
+    #[test]
+    fn a_state_changes_a_scale_and_a_stroke() {
+        let r = resolved(
+            "TextButton",
+            "transition hover:scale-110 hover:stroke-yellow-400 hover:ring-4",
+        );
+
+        assert!(r.problems.is_empty(), "{:?}", r.problems);
+        assert_eq!(
+            r.states["hover"],
+            vec![
+                ("UIScale".to_string(), "{ Scale = 1.1 }".to_string()),
+                (
+                    "UIStroke".to_string(),
+                    "{ Color = Color3.fromRGB(250, 204, 21), Thickness = 4 }".to_string()
+                ),
+            ]
+        );
+        let child = |class: &str| {
+            r.children
+                .iter()
+                .find(|c| c.class == class)
+                .unwrap()
+                .props
+                .clone()
+        };
+        assert_eq!(child("UIScale"), [("Scale".to_string(), "1".to_string())]);
+        assert!(child("UIStroke").contains(&("Thickness".to_string(), "0".to_string())));
+
+        // A class at rest keeps its value.
+        let r = resolved("Frame", "scale-95 stroke-2 hover:scale-105 hover:stroke-4");
+        assert!(
+            r.children
+                .iter()
+                .any(|c| c.class == "UIScale" && c.props[0].1 == "0.95")
+        );
+        assert!(r.children.iter().any(|c| {
+            c.class == "UIStroke"
+                && c.props
+                    .contains(&("Thickness".to_string(), "2".to_string()))
+        }));
+
+        // A layout child cannot follow a state.
+        assert!(matches!(
+            resolved("Frame", "hover:p-4").problems[..],
+            [(0, Problem::VariantNeedsProperty)]
+        ));
     }
 
     #[test]

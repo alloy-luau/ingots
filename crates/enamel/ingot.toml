@@ -22,7 +22,7 @@ detail = "The class matches no utility, so it sets nothing. A typo in a name, or
 [lints.no_effect]
 default = "warn"
 summary = "a utility with no effect on a Roblox instance"
-detail = "Margins, shadows, cursors, and a few others have no property to set on a GuiObject. The class parses and does nothing; `gap-*` on the parent replaces a margin."
+detail = "Margins, shadows, cursors, and a few others have no property to set on a GuiObject. The class parses and does nothing; `gap-*` on the parent replaces a margin. A padding, a layout, or a corner behind a state, such as `hover:p-4`, also does nothing. Only a property, a scale, or a stroke changes with a state."
 
 [lints.not_an_element]
 default = "deny"
