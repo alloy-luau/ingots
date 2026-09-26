@@ -27,6 +27,9 @@ pub struct Options {
     pub color: Rgba,
     /// The classes of the project's `enamel.aly`.
     pub theme: crate::enamel::Theme,
+    /// Whether the project lowers markup in the table form,
+    /// `create(name)(props)`, as Vide and Fusion do.
+    pub table: bool,
 }
 
 impl Default for Options {
@@ -44,6 +47,7 @@ impl Default for Options {
                 a: 1.0,
             },
             theme: crate::enamel::Theme::new(),
+            table: false,
         }
     }
 }
@@ -161,6 +165,8 @@ struct Writer<'a> {
     uses_rich: bool,
     uses_not: bool,
     uses_order: bool,
+    uses_child: bool,
+    uses_on: bool,
     reps: Vec<(usize, usize, String)>,
     ins: Vec<(usize, i64, usize, String)>,
     seq: usize,
@@ -222,6 +228,8 @@ impl<'a> Writer<'a> {
             uses_rich: false,
             uses_not: false,
             uses_order: false,
+            uses_child: false,
+            uses_on: false,
             reps: Vec::new(),
             ins: Vec::new(),
             seq: 0,
@@ -308,6 +316,14 @@ impl<'a> Writer<'a> {
 
         if self.uses_order {
             lead.push_str(&order_text(&self.opts.helper));
+        }
+
+        if self.uses_child {
+            lead.push_str(&child_text(&self.opts.helper));
+        }
+
+        if self.uses_on {
+            lead.push_str(&on_text(&self.opts.helper));
         }
 
         if !lead.is_empty() {
@@ -635,7 +651,8 @@ impl<'a> Writer<'a> {
 
         // Each rule sits on the line of the CSS it came from.
         let mut text = format!(
-            "<StyleLink StyleSheet={{{}_sheet(\"{}\", {{",
+            "<{} StyleSheet={{{}_sheet(\"{}\", {{",
+            self.child_tag("StyleLink"),
             self.opts.helper,
             id.replace('\\', "/").replace('"', "")
         );
@@ -1330,6 +1347,15 @@ impl<'a> Writer<'a> {
                     if fits {
                         self.replace(a.name_span.0, a.name_span.1, to);
                         written.insert(to.to_string());
+
+                        // Vide types each event's handler by its signal, so a
+                        // `() -> ()` for `Activated` fails the type check.
+                        if let (true, Value::Expr(s, t)) = (self.opts.table, a.value) {
+                            self.uses_on = true;
+                            let on = format!("{}_on(", self.opts.helper);
+                            self.insert(s, RANK_WRAP_OPEN, on);
+                            self.insert(t, RANK_WRAP_CLOSE, ")");
+                        }
                     } else {
                         self.find(
                             "no_effect",
@@ -1860,10 +1886,17 @@ impl<'a> Writer<'a> {
             .iter()
             .map(|(k, v)| format!(" {k}={{{v}}}"))
             .collect();
-        self.replace(e.name_span.0, e.name_span.1, format!("{class}{attrs}"));
+        // Vide's factory has no VideoFrame and no Sound either.
+        let (open_tag, close_tag) = match self.opts.table && matches!(class, "VideoFrame" | "Sound")
+        {
+            true => (self.child_tag(class), format!("{}_child", self.opts.helper)),
+
+            false => (class.to_string(), class.to_string()),
+        };
+        self.replace(e.name_span.0, e.name_span.1, format!("{open_tag}{attrs}"));
 
         if let Some((s, _)) = e.close {
-            self.replace(s + 2, s + 2 + e.name.len(), class);
+            self.replace(s + 2, s + 2 + e.name.len(), close_tag.clone());
         }
 
         let mut children = String::new();
@@ -1881,7 +1914,8 @@ impl<'a> Writer<'a> {
             }
 
             let p: String = props.iter().map(|(k, v)| format!(" {k}={{{v}}}")).collect();
-            children.push_str(&format!("<{c}{p} />"));
+            let tag = self.child_tag(c);
+            children.push_str(&format!("<{tag}{p} />"));
         }
 
         match e.self_close {
@@ -1889,7 +1923,7 @@ impl<'a> Writer<'a> {
                 let text = match children.is_empty() {
                     true => "/>".to_string(),
 
-                    false => format!(">{children}</{class}>"),
+                    false => format!(">{children}</{close_tag}>"),
                 };
                 self.replace(s, t, text);
             }
@@ -1945,6 +1979,21 @@ impl<'a> Writer<'a> {
                     href.unwrap_or_else(nil)
                 ),
             );
+        }
+    }
+
+    /// The tag for a child Silk adds, a UIPadding or a StyleLink. In the
+    /// table form the child component makes it: Vide types its factory
+    /// over 19 classes, so `create("UIPadding")` fails the type check.
+    fn child_tag(&mut self, class: &str) -> String {
+        match self.opts.table {
+            true => {
+                self.uses_child = true;
+
+                format!("{}_child Class=\"{class}\"", self.opts.helper)
+            }
+
+            false => class.to_string(),
         }
     }
 
@@ -2880,6 +2929,70 @@ return v end "
     )
 }
 
+/// The child component as one line of Alloy, for the table form: it
+/// makes a child with `Instance.new`, so no typed factory call names its
+/// class. It connects a handler to a signal, as a VideoFrame takes one.
+pub fn child_text(helper: &str) -> String {
+    format!(
+        "local function {helper}_child(props: any): Instance local c: any = Instance.new(props.Class) \
+for k, v in props do if k == \"Class\" then continue end \
+if typeof(c[k]) == \"RBXScriptSignal\" then c[k]:Connect(v) else c[k] = v end end return c end "
+    )
+}
+
+/// The handler helper as one line of Alloy, for the table form. It takes
+/// any function for an event and keeps a nil handler nil: Vide types
+/// `Activated` as `(InputObject, number) -> ()`, and a `() -> ()` fails.
+pub fn on_text(helper: &str) -> String {
+    format!(
+        "local function {helper}_on(f: any): any if f == nil then return nil end \
+local h: any = f return function(...) h(...) end end "
+    )
+}
+
+/// Whether `alloy.toml` lowers markup in the table form,
+/// `create(name)(props)`, as Vide and Fusion do. It reads `[alx.factory]
+/// backend` as a table, an inline table, or a dotted key, as Enamel does.
+// ponytail: a factory set in `.config.aly` or `luaux.toml` keeps the
+// Roblox tags. Read the factory from the host once init carries it.
+pub fn table_form(toml: &str) -> bool {
+    let mut table = String::new();
+
+    for line in toml.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+
+        if let Some(name) = line.strip_prefix('[') {
+            table = name.trim_end_matches(']').trim().to_string();
+
+            continue;
+        }
+
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = match table.as_str() {
+            "" => key.trim().to_string(),
+
+            t => format!("{t}.{}", key.trim()),
+        };
+        let value: String = value
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .map(|c| if c == '\'' { '"' } else { c })
+            .collect();
+
+        match key.as_str() {
+            "alx.factory.backend" => return value == "\"table\"",
+
+            "alx.factory" => return value.contains("backend=\"table\""),
+
+            _ => {}
+        }
+    }
+
+    false
+}
+
 /// Applies edits the way the host does, for tests.
 #[cfg(test)]
 pub fn apply(source: &str, edits: &[Edit]) -> String {
@@ -3484,6 +3597,58 @@ mod tests {
 
         assert!(lints("return <div onChange={f}></div>\n").contains(&"no_effect".to_string()));
         assert!(!lints("return <input maxLength=\"4\" />\n").contains(&"no_effect".to_string()));
+    }
+
+    /// Game UI 26: in the table form, a child Silk adds and a VideoFrame
+    /// come from the child component, and a handler goes through the
+    /// handler helper, so Vide's typed factory takes the output.
+    #[test]
+    fn the_table_form_writes_what_a_typed_factory_takes() {
+        let opts = Options {
+            table: true,
+            ..Options::default()
+        };
+        let src = "return <div>\n<style>.a { color: red }</style>\n<button onClick={go}>Go</button>\n<video src=\"x\" onMouseEnter={go} />\n</div>\n";
+        let out = apply(src, &run(src, "a.alx", &opts).edits);
+
+        assert!(
+            out.contains("<__silk_child Class=\"StyleLink\" StyleSheet="),
+            "{out}"
+        );
+        assert!(
+            out.contains("<__silk_child Class=\"UIPadding\" PaddingTop="),
+            "{out}"
+        );
+        assert!(
+            out.contains("<__silk_child Class=\"UIListLayout\" SortOrder="),
+            "{out}"
+        );
+        assert!(out.contains("Activated={__silk_on(go)}"), "{out}");
+        assert!(
+            out.contains("<__silk_child Class=\"VideoFrame\" Name={\"video\"}"),
+            "{out}"
+        );
+        assert!(out.contains("MouseEnter={__silk_on(go)}"), "{out}");
+        assert!(
+            out.contains("local function __silk_child(props: any): Instance"),
+            "{out}"
+        );
+
+        // The element form keeps the Roblox tags, which React needs.
+        let out = silk(src);
+        assert!(
+            out.contains("<UIPadding ") && out.contains("Activated={go}"),
+            "{out}"
+        );
+
+        assert!(table_form(
+            "[build]\nin = \"src\"\n\n[alx.factory]\nbackend = \"table\" # Vide\n"
+        ));
+        assert!(table_form(
+            "[alx]\nfactory = { backend = 'table', create = 'create' }\n"
+        ));
+        assert!(table_form("alx.factory.backend = \"table\"\n"));
+        assert!(!table_form("[alx.factory]\nbackend = \"element\"\n"));
     }
 
     /// Game UI 12: a classed child on the line of its box compiles as it

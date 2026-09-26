@@ -197,6 +197,17 @@ Enamel completes and explains its utilities in `className`, and does not
 report a class it does not know on an HTML element, since that is a CSS
 class.
 
+## The table form
+
+Vide and Fusion use the table form of `[alx.factory]` in `alloy.toml`.
+Vide types its factory over 19 classes, with no UIPadding, UIStroke,
+StyleLink, VideoFrame, or Sound, and types each event's handler by its
+signal. So in the table form, Silk writes each child it adds, and each
+`<video>` and `<audio>`, as the `__silk_child` component, which calls
+`Instance.new`. It passes each handler through `__silk_on`, so a
+`() -> ()` fits `Activated`. The element form, for React, keeps the
+Roblox tags and the handlers as written.
+
 ## Options
 
 ```toml
