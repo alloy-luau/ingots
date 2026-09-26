@@ -221,6 +221,7 @@ A `style` table and a `<style>` rule take the same properties:
 | `position`, `top`, `left`, `right`, `bottom`, `transform: translate()` | `Position`, `AnchorPoint` |
 | `transform: rotate()`, `rotate`, `transform: scale()`, `scale`, `z-index` | `Rotation`, a UIScale, `ZIndex` |
 | `display: none`, `visibility`, `overflow`, `pointer-events` | `Visible`, `ClipsDescendants`, a ScrollingFrame, `Interactable` |
+| `appearance: none` on a `button`, an `input`, or a `textarea` | no background, border, corner, or padding from the browser's look |
 | `font`, `font-family`, `font-size`, `font-weight`, `font-style`, `line-height` | `FontFace`, `TextSize`, `LineHeight` |
 | `text-align`, `vertical-align`, `white-space`, `text-overflow` | `TextXAlignment`, `TextYAlignment`, `TextWrapped`, `TextTruncate` |
 | `text-decoration`, `text-transform` in a `style` table | RichText `<u>`, `<s>`, `<uc>`, `<sc>` |
@@ -269,6 +270,10 @@ the `Size` Silk writes, and the other axis keeps Silk's size. Enamel
 writes `AutomaticSize`, so Silk passes its own automatic axis on as a
 class: `<div className="w-full">` keeps its automatic height as
 `w-full h-auto`.
+
+`appearance-none` drops the browser's look of a control, as
+`appearance: none` does, so `<button className="appearance-none">` is a
+bare TextButton that the other classes style.
 
 An overflow class makes the box a ScrollingFrame, as `overflow: auto`
 does: `overflow-y-auto` scrolls down, `overflow-x-auto` sideways, and

@@ -123,6 +123,8 @@ pub struct Out {
     pub opacity: Option<f64>,
     /// `overflow: auto` or `scroll`: the element becomes a ScrollingFrame.
     pub scroll: Option<&'static str>,
+    /// `appearance: none`: a control drops the look a browser gives it.
+    pub plain: bool,
     /// RichText tags to wrap the text in: `text-decoration` and
     /// `text-transform`.
     pub rich: Vec<(&'static str, &'static str)>,
@@ -366,6 +368,11 @@ const K: fn(&'static str, &'static str, &'static [&'static str]) -> Known =
 /// Every CSS property Silk maps, for completion and hover.
 pub fn catalog() -> Vec<Known> {
     vec![
+        K(
+            "appearance",
+            "`none` drops the look a browser gives a control: its background, border, corner, and padding",
+            &["none", "auto"],
+        ),
         K(
             "align-items",
             "the cross-axis alignment of the `UIListLayout`",
@@ -1168,6 +1175,14 @@ pub fn apply(decls: &[Decl], ctx: &Ctx, out: &mut Out) {
                     });
                     out.set("ClipsDescendants", "true");
                 }
+
+                _ => bad(out),
+            },
+
+            "appearance" | "-webkit-appearance" => match lower.as_str() {
+                "none" => out.plain = true,
+
+                "auto" => out.plain = false,
 
                 _ => bad(out),
             },

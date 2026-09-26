@@ -23,6 +23,8 @@ pub const ARRANGE: &str = "layout:arrange";
 /// inside the `Size` the tag writes, so Silk's height stays.
 pub const SIZE_X: &str = "size:x";
 pub const SIZE_Y: &str = "size:y";
+/// `appearance-none`: a control drops the look a browser gives it.
+pub const APPEARANCE: &str = "look:plain";
 /// `absolute` and `fixed`: the element places itself, out of the flow.
 pub const PLACED: &str = "position:placed";
 /// `w-auto`: the X axis of `AutomaticSize`, which starts at 0.
@@ -296,6 +298,7 @@ fn utility(base: &str) -> &'static [&'static str] {
         "size-auto" | "size-fit" => &[AUTO_X, AUTO_Y],
         "center" => &["Position", "AnchorPoint"],
         "absolute" | "fixed" => &[PLACED],
+        "appearance-none" => &[APPEARANCE],
         _ => &[],
     };
 

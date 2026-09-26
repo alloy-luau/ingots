@@ -1302,6 +1302,8 @@ impl<'a> Writer<'a> {
                                         | "height"
                                         | "max-height"
                                         | "position"
+                                        | "appearance"
+                                        | "-webkit-appearance"
                                         | "top"
                                         | "left"
                                         | "right"
@@ -1746,6 +1748,21 @@ impl<'a> Writer<'a> {
         // The defaults a class of the element sets itself.
         d.props.retain(|(k, _)| !replaced.contains(k));
         d.mods.retain(|(c, _)| !replaced.contains(*c));
+
+        // `appearance: none` drops the look a browser gives a control, as
+        // Tailwind's reset does: the background, the border, the corner,
+        // and the padding.
+        let plain = style.plain
+            || replaced.contains(crate::enamel::APPEARANCE)
+            || static_decls
+                .iter()
+                .any(|d| d.name.ends_with("appearance") && d.value.trim() == "none");
+
+        if plain && matches!(tag.kind, Kind::Button | Kind::Input | Kind::TextArea) {
+            d.mods.clear();
+            d.props.retain(|(k, _)| k != "BackgroundColor3");
+            d.set("BackgroundTransparency", "1");
+        }
 
         // ---- the attributes
         let mut written: HashSet<String> = HashSet::new();
@@ -4612,6 +4629,38 @@ mod tests {
             with_enamel("return <div className=\"h-10 overflow-auto scroll-x\"><p>a</p></div>\n");
         assert!(out.contains("<ScrollingFrame"), "{out}");
         assert!(!out.contains("ScrollingDirection="), "{out}");
+    }
+
+    /// `appearance: none` drops the look a browser gives a control, so a
+    /// bare TextButton needs no Roblox tag.
+    #[test]
+    fn appearance_none_drops_the_browser_look() {
+        let out = silk("return <button style={{ appearance = \"none\" }}>Go</button>\n");
+
+        assert!(out.contains("BackgroundTransparency={1}"), "{out}");
+        assert!(!out.contains("BackgroundColor3"), "{out}");
+        assert!(
+            !out.contains("UIPadding") && !out.contains("UIStroke") && !out.contains("UICorner"),
+            "{out}"
+        );
+
+        let out =
+            with_enamel("return <button className=\"appearance-none size-9 rounded-lg\" />\n");
+        assert!(
+            !out.contains("UIStroke") && !out.contains("UIPadding"),
+            "{out}"
+        );
+
+        let out = silk(
+            "return <div><style>.x { appearance: none; }</style><input className=\"x\" /></div>\n",
+        );
+        assert!(!out.contains("UIStroke"), "{out}");
+
+        // A box keeps its look: `appearance` is for controls.
+        assert!(
+            silk("return <ul style={{ appearance = \"none\" }}><li>a</li></ul>\n")
+                .contains("UIPadding")
+        );
     }
 
     #[test]
