@@ -283,47 +283,18 @@ return merge(size) end "
     )
 }
 
-/// The factory of the project at `root`: whether it lowers markup in the
-/// table form, `create(name)(props)`, as Vide and Fusion do, and the
-/// `compute` it sets for Fusion. Alloy reads `alloy.toml`, else
-/// `.config.aly`, and reads `luaux.toml` when that file sets no factory.
-/// Silk reads the factory the same way.
-pub fn factory(root: &std::path::Path) -> (bool, Option<String>) {
-    let read = |name: &str| std::fs::read_to_string(root.join(name)).ok();
-    let text = read("alloy.toml")
-        .or_else(|| read(".config.aly"))
-        .filter(|t| value(t, "backend").is_some() || value(t, "create").is_some())
-        .or_else(|| read("luaux.toml"))
-        .unwrap_or_default();
+/// The factory in the `[alx]` table the host sends at init: whether the
+/// project lowers markup in the table form, `create(name)(props)`, as
+/// Vide and Fusion do, and the `compute` it sets for Fusion. An old host
+/// sends none, and Enamel takes the element form, as Alloy does with no
+/// `[alx]`.
+pub fn factory(alx: &serde_json::Value) -> (bool, Option<String>) {
+    let text = |key: &str| alx["factory"].get(key).and_then(serde_json::Value::as_str);
 
     (
-        value(&text, "backend").as_deref() == Some("table"),
-        value(&text, "compute"),
+        text("backend") == Some("table"),
+        text("compute").map(str::to_string),
     )
-}
-
-/// The string a key of the factory takes, in TOML or in the table of a
-/// `.config.aly`.
-// ponytail: a key of the same name in another table of the file reads as
-// the factory's. Read the factory from the host once init carries it.
-fn value(text: &str, key: &str) -> Option<String> {
-    text.lines().find_map(|l| {
-        let cut = [l.find('#'), l.find("--")].into_iter().flatten().min();
-        let code = &l[..cut.unwrap_or(l.len())];
-        let at = code.find(key)?;
-        let bounded = !code[..at]
-            .chars()
-            .next_back()
-            .is_some_and(|c| c.is_alphanumeric() || c == '_');
-        let rest = code[at + key.len()..]
-            .trim_start()
-            .strip_prefix('=')?
-            .trim_start();
-        let quote = rest.chars().next().filter(|q| matches!(q, '"' | '\''))?;
-        let body = &rest[1..];
-
-        bounded.then(|| body[..body.find(quote).unwrap_or(body.len())].to_string())
-    })
 }
 
 /// The byte where the helper goes: the start of the first line that is
@@ -419,20 +390,9 @@ mod tests {
         );
         assert!(apply(src, &plan.edits(src, "__enamel", false, None)).contains("<UIPadding "));
 
-        let table = |t: &str| value(t, "backend").as_deref() == Some("table");
-        assert!(table(
-            "[build]\nin = \"src\"\n\n[alx.factory]\nbackend = \"table\" # Vide\ncreate = \"vide.create\"\n"
-        ));
-        assert!(table(
-            "[alx]\nfactory = { backend = 'table', create = 'create' }\n"
-        ));
-        assert!(table("alx.factory.backend = \"table\"\n"));
-        assert!(table(
-            "  alx = {\n    factory = { backend = 'table' },\n  },\n"
-        ));
-        assert!(!table("[alx.factory]\nbackend = \"element\"\n"));
-        assert!(!table("[build]\nin = \"src\"\n"));
-        assert!(!table("-- backend = 'table'\n"));
+        let alx = serde_json::json!({ "factory": { "backend": "table", "compute": "computed" } });
+        assert_eq!(factory(&alx), (true, Some("computed".into())));
+        assert_eq!(factory(&serde_json::Value::Null), (false, None));
     }
 
     /// A lone hole in a text element is its Text. With children beside

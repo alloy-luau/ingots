@@ -154,9 +154,11 @@ impl Handler for Enamel {
             self.helper = v;
         }
 
+        (self.table, self.compute) = emit::factory(&settings.alx);
+
         if !settings.root.is_empty() {
             let root = std::path::Path::new(&settings.root);
-            (self.table, self.compute) = emit::factory(root);
+
             self.watched = theme::Watched::at(root);
             self.ctx.theme = self.watched.theme.clone();
         }

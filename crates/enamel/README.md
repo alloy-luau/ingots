@@ -21,9 +21,9 @@ through a spread. It sets up once for each instance, and it runs a
 `{ }` hole is the Text. When the classes add a child there, the hole
 becomes a `Text={...}` attribute, so it does not turn into a child.
 
-Vide and Fusion use the table form of `[alx.factory]`. Enamel reads
-the factory where Alloy does: `alloy.toml`, else `.config.aly`, and
-`luaux.toml` when that file sets no factory. There, a one-line component calls `Instance.new` for each child that
+Vide and Fusion use the table form of `[alx.factory]`. The host sends
+the factory at init, from `alloy.toml` or `.config.aly` alike. An older
+host sends none, and Enamel takes the element form. There, a one-line component calls `Instance.new` for each child that
 the classes add. Vide types its factory over 19 classes, so a factory
 call for a `UIPadding` or a `UIStroke` fails the type check.
 
