@@ -24,6 +24,8 @@ use classes::{Class, Context, Element, Problem};
 struct Enamel {
     ctx: Context,
     helper: String,
+    /// The project lowers markup in the table form, as Vide does.
+    table: bool,
     catalog: Vec<classes::Entry>,
     watched: theme::Watched,
 }
@@ -36,6 +38,7 @@ impl Enamel {
         Self {
             ctx,
             helper: "__enamel".into(),
+            table: false,
             catalog,
             watched: theme::Watched::default(),
         }
@@ -149,7 +152,10 @@ impl Handler for Enamel {
         }
 
         if !settings.root.is_empty() {
-            self.watched = theme::Watched::at(std::path::Path::new(&settings.root));
+            let root = std::path::Path::new(&settings.root);
+            self.table = std::fs::read_to_string(root.join("alloy.toml"))
+                .is_ok_and(|toml| emit::table_form(&toml));
+            self.watched = theme::Watched::at(root);
             self.ctx.theme = self.watched.theme.clone();
         }
 
@@ -194,7 +200,7 @@ impl Handler for Enamel {
         let mut edits = Vec::new();
 
         for plan in &plans {
-            edits.extend(plan.edits(&self.helper));
+            edits.extend(plan.edits(&file.source, &self.helper, self.table));
         }
 
         // The theme's prelude and the state helper share one insert at
@@ -208,6 +214,14 @@ impl Handler for Enamel {
 
         if plans.iter().any(emit::Plan::uses_helper) {
             lead.push_str(&emit::helper_text(&self.helper));
+        }
+
+        if self.table && plans.iter().any(emit::Plan::adds_children) {
+            lead.push_str(&emit::child_text(&self.helper));
+        }
+
+        if plans.iter().any(emit::Plan::merges_size) {
+            lead.push_str(&emit::size_text(&self.helper));
         }
 
         if !lead.is_empty() {
@@ -317,11 +331,12 @@ impl Handler for Enamel {
                             needs.word()
                         ),
                     ),
+                    // Enamel knows the class, so the report is no_effect.
                     Problem::VariantNeedsProperty => Finding::new(
-                        "unknown_class",
+                        "no_effect",
                         span,
                         format!(
-                            "`{token}` adds a child or a marker; only a property can change with a state"
+                            "`{token}` sets nothing: a layout child or a marker cannot change with a state; a property, a scale, or a stroke can"
                         ),
                     ),
                 };

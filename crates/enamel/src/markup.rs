@@ -25,6 +25,12 @@ pub struct Found {
     /// Whether the tag is an HTML element that Silk writes, with the
     /// classes in `className` or `class`.
     pub html: bool,
+    /// The expression of a `Size={...}` attribute on the open tag.
+    pub size_attr: Option<(usize, usize)>,
+    /// The `{ }` hole that is the whole body, with no `Text` attribute
+    /// on the tag. The markup compiler reads it as the Text of a text
+    /// element.
+    pub text_hole: Option<(usize, usize)>,
 }
 
 fn is_name_byte(b: u8) -> bool {
@@ -123,6 +129,14 @@ fn find_named(source: &str, attr_name: &str) -> Vec<Found> {
         }
 
         let html = tag.starts_with(|c: char| c.is_ascii_lowercase());
+        let size_attr = attr_value(source, name_end, open_end, "Size")
+            .filter(|v| v.2)
+            .map(|(s, e, _)| (s, e));
+        let text_hole = self_close
+            .is_none()
+            .then(|| lone_hole(source, open_end, end))
+            .flatten()
+            .filter(|_| attr_value(source, name_end, open_end, "Text").is_none());
         out.push(Found {
             tag,
             start,
@@ -133,6 +147,8 @@ fn find_named(source: &str, attr_name: &str) -> Vec<Found> {
             classes,
             in_children: in_children(source, start),
             html,
+            size_attr,
+            text_hole,
         });
         from = attr.1;
     }
@@ -193,6 +209,14 @@ fn open_tag_end(source: &str, from: usize) -> Option<(usize, Option<(usize, usiz
     let mut i = from;
 
     while i < bytes.len() {
+        if depth > 0
+            && let Some(end) = comment_end(source, i)
+        {
+            i = end;
+
+            continue;
+        }
+
         match bytes[i] {
             b'{' => depth += 1,
             b'}' => depth -= 1,
@@ -231,11 +255,100 @@ fn open_tag_end(source: &str, from: usize) -> Option<(usize, Option<(usize, usiz
     None
 }
 
+/// The value of a `name=` attribute of the open tag between `from` and
+/// `to`: the span inside its braces or quotes, and whether it is a hole.
+fn attr_value(source: &str, from: usize, to: usize, name: &str) -> Option<(usize, usize, bool)> {
+    let bytes = source.as_bytes();
+    let key = format!("{name}=");
+    let named = |i: usize| {
+        i > key.len()
+            && source.get(i - key.len()..i) == Some(key.as_str())
+            && bytes[i - key.len() - 1].is_ascii_whitespace()
+    };
+    let mut i = from;
+
+    while i < to {
+        match bytes[i] {
+            b'{' => {
+                let end = skip_hole(source, i);
+
+                if named(i) {
+                    return Some((i + 1, end - 1, true));
+                }
+
+                i = end;
+
+                continue;
+            }
+            b'"' | b'\'' => {
+                let (open, q) = (i, bytes[i]);
+                i += 1;
+
+                while i < to && bytes[i] != q {
+                    i += 1;
+                }
+
+                if named(open) {
+                    return Some((open + 1, i, false));
+                }
+            }
+            _ => {}
+        }
+
+        i += 1;
+    }
+
+    None
+}
+
+/// The `{ }` hole that is the whole body of an element, between the end
+/// of its open tag and its close tag.
+fn lone_hole(source: &str, open_end: usize, end: usize) -> Option<(usize, usize)> {
+    let close = source[..end].rfind("</")?;
+    let body = &source[open_end..close];
+    let start = open_end + body.len() - body.trim_start().len();
+    let stop = open_end + body.trim_end().len();
+
+    (source[start..].starts_with('{') && skip_hole(source, start) == stop).then_some((start, stop))
+}
+
+/// One past the end of the Luau comment that opens at `i`: a `--[[ ]]`
+/// or `--[==[ ]==]` block, else the rest of the line. `None` when no
+/// comment opens there. Inside a hole a comment is code, and a quote in
+/// it, `-- it's here`, opens no string.
+pub fn comment_end(source: &str, i: usize) -> Option<usize> {
+    let after = source.get(i..)?.strip_prefix("--")?;
+    let body = i + 2;
+    let level = after
+        .strip_prefix('[')
+        .map(|r| r.len() - r.trim_start_matches('=').len())
+        .filter(|l| after[1 + l..].starts_with('['));
+
+    Some(match level {
+        Some(l) => {
+            let close = format!("]{}]", "=".repeat(l));
+
+            source[body..]
+                .find(&close)
+                .map_or(source.len(), |n| body + n + close.len())
+        }
+
+        None => source[body..].find('\n').map_or(source.len(), |n| body + n),
+    })
+}
+
 /// Skips a `{ ... }` hole that starts at `i`; returns one past its `}`.
-fn skip_hole(bytes: &[u8], mut i: usize) -> usize {
+fn skip_hole(source: &str, mut i: usize) -> usize {
+    let bytes = source.as_bytes();
     let mut depth = 0i32;
 
     while i < bytes.len() {
+        if let Some(end) = comment_end(source, i) {
+            i = end;
+
+            continue;
+        }
+
         match bytes[i] {
             b'{' => depth += 1,
             b'}' => {
@@ -275,7 +388,7 @@ fn element_end(source: &str, from: usize) -> Option<usize> {
     while i < bytes.len() {
         match bytes[i] {
             b'{' => {
-                i = skip_hole(bytes, i);
+                i = skip_hole(source, i);
 
                 continue;
             }
@@ -448,6 +561,31 @@ mod tests {
         assert!(label.self_close.is_some());
         assert!(label.in_children);
         assert_eq!(&src[label.attr.0..label.attr.1], "ClassName=\"text-white\"");
+    }
+
+    /// A quote in a comment inside a hole opens no string, so the scan
+    /// still finds the close of the element around it.
+    #[test]
+    fn a_quote_in_a_comment_does_not_open_a_string() {
+        for comment in [
+            "-- it's here\n",
+            "--[[ it's here ]]",
+            "--[==[ it's\n ]] here ]==]",
+        ] {
+            let src = format!(
+                "return (\n  <Frame ClassName=\"w-full\">\n    <TextButton Activated={{function()\n      {comment}\n    end}} />\n  </Frame>\n)\n"
+            );
+            let found = find(&src);
+
+            assert_eq!(found.len(), 1, "{src}");
+            assert_eq!(&src[found[0].end - 8..found[0].end], "</Frame>");
+        }
+
+        let src = "local x = <Frame Activated={function() -- it's\nend} ClassName=\"p-2\">{f() --[[ ' ]]}</Frame>\n";
+        let found = find(src);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(&src[found[0].end - 8..found[0].end], "</Frame>");
     }
 
     #[test]
