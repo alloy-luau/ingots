@@ -1798,7 +1798,7 @@ impl<'a> Writer<'a> {
         };
         let mut in_place: Vec<(&'static str, String)> = Vec::new();
 
-        for (name, value, _) in &dynamic {
+        for (name, value, span) in &dynamic {
             let key = match name.as_str() {
                 "background-color" => "BackgroundColor3",
 
@@ -1812,10 +1812,26 @@ impl<'a> Writer<'a> {
 
                 _ => continue,
             };
+
+            // A property the tag sets keeps the value of the tag, and the
+            // table holds the key once.
+            if e.attr(key).is_some() {
+                self.find(
+                    "no_effect",
+                    *span,
+                    format!("this sets nothing: the tag sets `{key}`"),
+                );
+
+                continue;
+            }
+
             in_place.push((key, value.clone()));
 
             // A background color shows the box.
-            if key == "BackgroundColor3" && d.get("BackgroundTransparency") == Some("1") {
+            if key == "BackgroundColor3"
+                && d.get("BackgroundTransparency") == Some("1")
+                && e.attr("BackgroundTransparency").is_none()
+            {
                 in_place.push(("BackgroundTransparency", "0".into()));
             }
         }
@@ -4924,6 +4940,28 @@ assert(__silk_not(false) == true)
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    /// LANG_BUGS 66: a Luau background color in `style` shows the box,
+    /// and a transparency on the tag keeps the value of the tag. The
+    /// table holds each key once.
+    #[test]
+    fn a_property_the_tag_sets_keeps_the_value_of_the_tag() {
+        let src = "return <button className=\"appearance-none\" style={{ backgroundColor = fill }} BackgroundTransparency={clear}>\n  Small\n</button>\n";
+
+        for out in [vide(src), silk(src)] {
+            assert_eq!(out.matches("BackgroundTransparency=").count(), 1, "{out}");
+            assert!(out.contains("BackgroundTransparency={clear}"), "{out}");
+            assert!(out.contains("BackgroundColor3={fill}"), "{out}");
+        }
+
+        // A key the tag writes itself takes the value of the tag.
+        let src = "return <div style={{ backgroundColor = fill, zIndex = z }} BackgroundColor3={other} />\n";
+        let out = silk(src);
+        assert_eq!(out.matches("BackgroundColor3=").count(), 1, "{out}");
+        assert!(out.contains("BackgroundColor3={other}"), "{out}");
+        assert!(out.contains("ZIndex={z}"), "{out}");
+        assert!(lints(src).contains(&"no_effect".to_string()));
     }
 
     /// LANG_BUGS 65: the items of `vide.values` come in the order of a
