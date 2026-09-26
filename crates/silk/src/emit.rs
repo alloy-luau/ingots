@@ -559,7 +559,8 @@ impl<'a> Writer<'a> {
                             RANK_WRAP_OPEN,
                             format!("{open}{}_order((function() return ", self.opts.helper),
                         );
-                        self.insert(e.end, RANK_WRAP_CLOSE, format!(" end)(), {k}){close}"));
+                        let tail = self.live(&format!("{k})"));
+                        self.insert(e.end, RANK_WRAP_CLOSE, format!(" end)(), {tail}{close}"));
                     }
                 }
 
@@ -784,7 +785,7 @@ impl<'a> Writer<'a> {
                 Mapped::Props(list) => {
                     let text = list
                         .iter()
-                        .map(|(k, v)| format!("{k}={{{v}}}"))
+                        .map(|(k, v)| format!("{k}={{{}}}", self.live(v)))
                         .collect::<Vec<_>>()
                         .join(" ");
                     self.uses_not |= text.contains(&format!("{}_not(", self.opts.helper));
@@ -1839,7 +1840,7 @@ impl<'a> Writer<'a> {
                 Mapped::Props(list) => {
                     let text = list
                         .iter()
-                        .map(|(k, v)| format!("{k}={{{v}}}"))
+                        .map(|(k, v)| format!("{k}={{{}}}", self.live(v)))
                         .collect::<Vec<_>>()
                         .join(" ");
                     self.uses_not |= text.contains(&format!("{}_not(", self.opts.helper));
@@ -2301,7 +2302,8 @@ impl<'a> Writer<'a> {
                         self.uses_order = true;
                         let open = format!("{}_order(", self.opts.helper);
                         self.insert(at + 1, RANK_ORDER_OPEN, open);
-                        self.insert(t - 1, RANK_ORDER_CLOSE, format!(", {order})"));
+                        let tail = self.live(&format!("{order})"));
+                        self.insert(t - 1, RANK_ORDER_CLOSE, format!(", {tail}"));
                     }
                 }
             }
@@ -2397,15 +2399,48 @@ impl<'a> Writer<'a> {
             .map(|(k, v)| format!(" {k}={{{v}}}"))
             .collect();
 
-        // In the element form the body is an element and not an instance,
-        // so React hands the instance to the viewport helper as a `ref`.
-        if let Some(vp) = self.viewports.get(&i).filter(|_| !self.opts.factory.table) {
-            self.uses_viewport = true;
-            attrs.push_str(&format!(
-                " {{{{ ref = {}_viewport({}) }}}}",
-                self.opts.helper,
-                vp.args()
-            ));
+        // The helper takes the tags, a link, a change handler, and a limit.
+        let tags = match (&tags_expr, !class_tokens.is_empty()) {
+            (Some(x), _) => Some(x.clone()),
+
+            (None, true) => Some(format!("\"{}\"", class_tokens.join(" "))),
+
+            _ => None,
+        }
+        .filter(|_| self.opts.tags);
+        let tagged = tags.is_some() || href.is_some() || change.is_some() || limit.is_some();
+        let nil = || "nil".to_string();
+        let helper_args = format!(
+            "{}, {}, {}, {}",
+            tags.unwrap_or_else(nil),
+            href.unwrap_or_else(nil),
+            change.clone().unwrap_or_else(nil),
+            limit.clone().unwrap_or_else(nil)
+        );
+        let viewport = self.viewports.get(&i).cloned();
+
+        // In the element form an element is no instance, so React hands
+        // the instance to the helpers as one `ref`, through a spread.
+        if !self.opts.factory.table && (tagged || viewport.is_some()) {
+            let fit = viewport.as_ref().map(|vp| {
+                self.uses_viewport = true;
+
+                format!("{}_viewport({})", self.opts.helper, vp.args())
+            });
+            let reference = match tagged {
+                true => {
+                    self.uses_helper = true;
+
+                    format!(
+                        "{}(nil, {helper_args}, {})",
+                        self.opts.helper,
+                        fit.unwrap_or_else(nil)
+                    )
+                }
+
+                false => fit.unwrap_or_else(nil),
+            };
+            attrs.push_str(&format!(" {{{{ ref = {reference} }}}}"));
         }
 
         // Vide's factory has no VideoFrame and no Sound either.
@@ -2465,37 +2500,16 @@ impl<'a> Writer<'a> {
             None => {}
         }
 
-        // ---- the helper: tags and a link
-        let tags = match (&tags_expr, self.opts.tags && !class_tokens.is_empty()) {
-            (Some(x), _) => Some(x.clone()),
-
-            (None, true) => Some(format!("\"{}\"", class_tokens.join(" "))),
-
-            _ => None,
-        };
-
-        if tags.is_some() && !self.opts.tags {
-            // Tags are off; nothing to wrap.
-        }
-
-        let tags = tags.filter(|_| self.opts.tags);
-        let tagged = tags.is_some() || href.is_some() || change.is_some() || limit.is_some();
-        let viewport = self
-            .viewports
-            .get(&i)
-            .cloned()
-            .filter(|_| self.opts.factory.table);
-
-        if tagged || viewport.is_some() {
+        // ---- the helper: tags, a link, a change, and the viewport. The
+        // table form builds the element inside a function the helper calls
+        // once: the markup compiler reads markup outside a function in a
+        // child as a condition that never updates.
+        if self.opts.factory.table && (tagged || viewport.is_some()) {
             let (open, close) = self.hole_braces(i);
-            let nil = || "nil".to_string();
             let mut pre = open.to_string();
             let mut post = String::new();
 
-            // The element builds inside a function the helper calls once:
-            // the markup compiler reads markup outside a function in a
-            // child as a condition that never updates.
-            if let Some(vp) = viewport {
+            if let Some(vp) = &viewport {
                 self.uses_viewport = true;
                 pre.push_str(&format!(
                     "{}_viewport({}, function() return ",
@@ -2507,26 +2521,30 @@ impl<'a> Writer<'a> {
 
             if tagged {
                 self.uses_helper = true;
-                // A change handler and a limit ride after the tags and the link.
-                let input = match (&change, &limit) {
-                    (None, None) => String::new(),
-
-                    _ => format!(
-                        ", {}, {}",
-                        change.clone().unwrap_or_else(nil),
-                        limit.clone().unwrap_or_else(nil)
-                    ),
-                };
                 pre.push_str(&format!("{}(function() return ", self.opts.helper));
-                post = format!(
-                    " end, {}, {}{input}){post}",
-                    tags.unwrap_or_else(nil),
-                    href.unwrap_or_else(nil)
-                );
+                post = format!(" end, {helper_args}){post}");
             }
 
             self.insert(e.start, RANK_WRAP_OPEN, pre);
             self.insert(e.end, RANK_WRAP_CLOSE, format!("{post}{close}"));
+        }
+    }
+
+    /// The end of a call of the negation, the escape, or the order
+    /// helper, with the `compute` of the factory as its last argument
+    /// when the project sets one. The helper derives a Fusion state
+    /// through it, as Alloy derives text.
+    fn live(&self, call: &str) -> String {
+        match (&self.opts.factory.compute, call.strip_suffix(')')) {
+            (Some((compute, _)), Some(head))
+                if call == ")"
+                    || call.starts_with(&format!("{}_not(", self.opts.helper))
+                    || head.parse::<usize>().is_ok() =>
+            {
+                format!("{head}, {compute})")
+            }
+
+            _ => call.to_string(),
         }
     }
 
@@ -2686,8 +2704,9 @@ impl<'a> Writer<'a> {
 
             self.uses_rich = true;
             let helper = format!("{}_rich(", self.opts.helper);
+            let close = self.live(")");
             self.insert(s + 1, RANK_WRAP_OPEN, helper);
-            self.insert(t - 1, RANK_WRAP_CLOSE, ")");
+            self.insert(t - 1, RANK_WRAP_CLOSE, close);
         }
     }
 
@@ -3435,29 +3454,44 @@ fn pad(original: &str, mut text: String) -> String {
 
 /// The helper as one line of Alloy: it tags an element, connects a link,
 /// and listens to the text of an input for `onChange` and `maxLength`,
-/// as React runs `onChange` on each key. A link finds its target by `Name` from the top of its UI tree,
-/// as `#id` finds an element in the document, and scrolls the target's
-/// nearest ScrollingFrame to it; `#` scrolls the link's own to the top.
-/// The helper needs a target whose elements are instances, as Vide and
-/// Fusion build them.
+/// as React runs `onChange` on each key. A link finds its target by
+/// `Name` from the top of its UI tree, as `#id` finds an element in the
+/// document, and scrolls the target's nearest ScrollingFrame to it; `#`
+/// scrolls the link's own to the top.
+///
+/// The table form calls it with `make`, which builds the element. The
+/// element form calls it with nil, and it returns the function React
+/// calls as a `ref`, again on each render. So it connects once for each
+/// instance and keeps the latest handler, as React does. `after` is
+/// another `ref` of the element, the viewport's.
 pub fn helper_text(helper: &str) -> String {
     format!(
-        "local function {helper}(make: () -> any, tags: string?, href: string?, change: any, limit: number?): any \
-local el = make() \
-if change ~= nil or limit ~= nil then local call: any = change el:GetPropertyChangedSignal(\"Text\"):Connect(function() \
-local cut = if limit ~= nil then utf8.offset(el.Text, limit + 1) else nil \
-if cut ~= nil and cut <= #el.Text then el.Text = string.sub(el.Text, 1, cut - 1) return end \
-if change ~= nil then call(el.Text) end end) end \
+        "local {helper}_state: {{ [any]: any }} = setmetatable({{}}, {{ __mode = \"k\" }}) :: any \
+local function {helper}(make: any, tags: string?, href: string?, change: any, limit: number?, after: any): any \
+local function apply(value: any): any \
+if after ~= nil then local fit: any = after fit(value) end \
+if typeof(value) ~= \"Instance\" then return value end \
+local el: any = value \
+local s: any = {helper}_state[el] local first = s == nil \
+if first then s = {{}} {helper}_state[el] = s end \
+s.change = change s.limit = limit s.href = href \
 if tags ~= nil then for tag in string.gmatch(tags, \"%S+\") do el:AddTag(tag) end end \
-if href ~= nil then el.Activated:Connect(function() \
+if first and (change ~= nil or limit ~= nil) then el:GetPropertyChangedSignal(\"Text\"):Connect(function() \
+local cut = if s.limit ~= nil then utf8.offset(el.Text, s.limit + 1) else nil \
+if cut ~= nil and cut <= #el.Text then el.Text = string.sub(el.Text, 1, cut - 1) return end \
+local call: any = s.change if call ~= nil then call(el.Text) end end) end \
+if first and href ~= nil then el.Activated:Connect(function() \
+local link: string = s.href \
 local root = el while root.Parent ~= nil and root.Parent:IsA(\"GuiBase2d\") do root = root.Parent end \
-local target = if href == \"\" then nil else root:FindFirstChild(href, true) \
-if href ~= \"\" and target == nil then return end \
+local target = if link == \"\" then nil else root:FindFirstChild(link, true) \
+if link ~= \"\" and target == nil then return end \
 local frame = (target or el).Parent while frame ~= nil and not frame:IsA(\"ScrollingFrame\") do frame = frame.Parent end \
 if frame == nil then return end \
 local at = if target ~= nil then target.AbsolutePosition - frame.AbsolutePosition + frame.CanvasPosition else Vector2.zero \
 frame.CanvasPosition = Vector2.new(math.max(at.X, 0), math.max(at.Y, 0)) end) end \
-return el end "
+return el end \
+if make == nil then return apply end \
+local build: any = make return apply(build()) end "
     )
 }
 
@@ -3507,22 +3541,28 @@ pub fn helper_at(source: &str) -> usize {
 }
 
 /// The escape helper as one line of Alloy: a value in RichText shows its
-/// `<`, `>`, and `&` as themselves. A source reads through it.
+/// `<`, `>`, and `&` as themselves. A reactive value reads through it, as
+/// through the negation helper.
 pub fn rich_text(helper: &str) -> String {
     format!(
-        "local function {helper}_rich(v: any): any \
+        "local function {helper}_rich(v: any, compute: any?): any \
 if type(v) == \"function\" then local f: any = v return function() return {helper}_rich(f()) end end \
+if type(v) == \"table\" and v.map ~= nil then return v:map(function(x: any) return {helper}_rich(x) end) end \
+if type(v) == \"table\" and compute ~= nil then local derive: any = compute return derive(function(use: any) return {helper}_rich(use(v)) end) end \
 return (string.gsub(string.gsub(string.gsub(tostring(v), \"&\", \"&amp;\"), \"<\", \"&lt;\"), \">\", \"&gt;\")) end "
     )
 }
 
 /// The negation helper as one line of Alloy: `disabled={busy}` stays
-/// live when `busy` is a source, which a reactive library reads as a
-/// function.
+/// live when `busy` is reactive. A Vide or Fluid source is a function, a
+/// React binding maps, and a Fusion state derives through `compute`, the
+/// function of `[alx.factory] compute` that Silk passes when it is set.
 pub fn not_text(helper: &str) -> String {
     format!(
-        "local function {helper}_not(v: any): any \
+        "local function {helper}_not(v: any, compute: any?): any \
 if type(v) == \"function\" then local f: any = v return function() return not f() end end \
+if type(v) == \"table\" and v.map ~= nil then return v:map(function(x: any) return not x end) end \
+if type(v) == \"table\" and compute ~= nil then local derive: any = compute return derive(function(use: any) return not use(v) end) end \
 return not v end "
     )
 }
@@ -3533,8 +3573,9 @@ return not v end "
 /// again, what the function returns each time.
 pub fn order_text(helper: &str) -> String {
     format!(
-        "local function {helper}_order(v: any, k: number): any \
+        "local function {helper}_order(v: any, k: number, compute: any?): any \
 if type(v) == \"function\" then local f: any = v return function() return {helper}_order(f(), k) end end \
+if type(v) == \"table\" and compute ~= nil and v.type == \"State\" then local derive: any = compute return derive(function(use: any) return {helper}_order(use(v), k) end) end \
 local list: any = if typeof(v) == \"Instance\" then {{ v }} elseif type(v) == \"table\" then v else {{}} \
 for n, c in ipairs(list) do local g: any = c if typeof(c) == \"Instance\" and (g :: any):IsA(\"GuiObject\") then (g :: any).LayoutOrder = k + n - 1 end end \
 return v end "
@@ -3755,28 +3796,40 @@ mod tests {
 
     #[test]
     fn a_class_tags_the_element_through_the_helper() {
-        let out = silk(
-            "return <div>\n  <button className=\"primary big\" onClick={go}>Go</button>\n</div>\n",
-        );
+        let src =
+            "return <div>\n  <button className=\"primary big\" onClick={go}>Go</button>\n</div>\n";
+        let out = vide(src);
 
         assert!(
             out.contains("{__silk(function() return <TextButton"),
             "{out}"
         );
-        assert!(out.contains("Activated={go}"), "{out}");
+        assert!(out.contains("Activated={__silk_on(go)}"), "{out}");
         assert!(
-            out.contains("</TextButton> end, \"primary big\", nil)}"),
+            out.contains("</TextButton> end, \"primary big\", nil, nil, nil)}"),
             "{out}"
         );
-        assert!(out.starts_with("local function __silk("), "{out}");
+        assert!(out.starts_with("local __silk_state"), "{out}");
+
+        // React's element is no instance: the helper takes it as a `ref`.
+        let out = silk(src);
+        assert!(
+            out.contains("{{ ref = __silk(nil, \"primary big\", nil, nil, nil, nil) }}"),
+            "{out}"
+        );
+        assert!(out.contains("Activated={go}"), "{out}");
     }
 
     #[test]
     fn a_link_scrolls_to_its_target() {
-        let out = silk("return <nav><a href=\"#faq\">FAQ</a></nav>\n");
+        let out = vide("return <nav><a href=\"#faq\">FAQ</a></nav>\n");
 
         assert!(out.contains("<TextButton"), "{out}");
-        assert!(out.contains(" end, nil, \"faq\")}"), "{out}");
+        assert!(out.contains(" end, nil, \"faq\", nil, nil)}"), "{out}");
+        assert!(
+            silk("return <nav><a href=\"#faq\">FAQ</a></nav>\n")
+                .contains("{{ ref = __silk(nil, nil, \"faq\", nil, nil, nil) }}")
+        );
         assert!(out.contains("\\<u>FAQ\\</u>"), "{out}");
     }
 
@@ -3914,7 +3967,7 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.contains("local function __silk_order(v: any, k: number): any"),
+            out.contains("local function __silk_order(v: any, k: number, compute: any?): any"),
             "{out}"
         );
     }
@@ -3932,12 +3985,12 @@ mod tests {
         assert!(out.contains("LayoutOrder={4000}"), "{out}");
 
         // A hole that starts with markup: the helper wraps the tag wrapper.
-        let out = silk("return <div><p>a</p>{<p className=\"x\">b</p>}</div>\n");
+        let out = vide("return <div><p>a</p>{<p className=\"x\">b</p>}</div>\n");
         assert!(
             out.contains("{__silk_order(__silk(function() return <TextLabel"),
             "{out}"
         );
-        assert!(out.contains("end, \"x\", nil), 2000)}"), "{out}");
+        assert!(out.contains("end, \"x\", nil, nil, nil), 2000)}"), "{out}");
 
         // A clickable box keeps its hole a child, in a fragment.
         let out = silk("return <div onClick={go}><p>a</p>{extra}</div>\n");
@@ -3984,7 +4037,7 @@ mod tests {
         let src = "--[[\n    The shop.\n]]\nreturn <div className=\"x\"><p>a</p></div>\n";
         let out = silk(src);
         assert!(
-            out.starts_with("--[[\n    The shop.\n]]\nlocal function __silk("),
+            out.starts_with("--[[\n    The shop.\n]]\nlocal __silk_state"),
             "{out}"
         );
     }
@@ -4114,6 +4167,29 @@ mod tests {
         apply(src, &run(src, "a.alx", &opts).edits)
     }
 
+    /// The table form, as Vide lowers it.
+    fn vide_opts() -> Options {
+        Options {
+            factory: Factory {
+                table: true,
+                create: Some("vide.create".into()),
+                compute: None,
+            },
+            ..Options::default()
+        }
+    }
+
+    fn vide(src: &str) -> String {
+        let text = apply(src, &run(src, "a.alx", &vide_opts()).edits);
+        assert_eq!(
+            text.matches('\n').count(),
+            src.matches('\n').count(),
+            "{text}"
+        );
+
+        text
+    }
+
     /// Game UI 9 and 16: a class drops only the defaults it sets. A text
     /// color keeps the size and the alignment, and a gradient keeps the
     /// clear background.
@@ -4219,8 +4295,18 @@ mod tests {
             "{out}"
         );
 
-        let out = with_enamel(
-            "return <button className=\"group\"><span className=\"group-hover:text-yellow-400\">Inner</span></button>\n",
+        let src = "return <button className=\"group\"><span className=\"group-hover:text-yellow-400\">Inner</span></button>\n";
+        let out = apply(
+            src,
+            &run(
+                src,
+                "a.alx",
+                &Options {
+                    enamel: true,
+                    ..vide_opts()
+                },
+            )
+            .edits,
         );
         assert!(out.contains("<TextLabel Name={\"span\"}"), "{out}");
         // A hole in a TextButton is text to the markup compiler; a
@@ -4259,7 +4345,11 @@ mod tests {
     /// runs it, and `maxLength` cuts the text.
     #[test]
     fn on_change_runs_on_each_key() {
-        let out = silk("return <input maxLength={24} onChange={f} />\n");
+        assert!(
+            silk("return <input maxLength={24} onChange={f} />\n")
+                .contains("{{ ref = __silk(nil, nil, nil, f, 24, nil) }}")
+        );
+        let out = vide("return <input maxLength={24} onChange={f} />\n");
         assert!(
             out.contains("return __silk(function() return <TextBox"),
             "{out}"
@@ -4271,7 +4361,7 @@ mod tests {
         );
         assert!(out.contains("GetPropertyChangedSignal(\"Text\")"), "{out}");
 
-        let out = silk("return <textarea onInput={name} className=\"x\"></textarea>\n");
+        let out = vide("return <textarea onInput={name} className=\"x\"></textarea>\n");
         assert!(out.contains(" end, \"x\", nil, name, nil)"), "{out}");
 
         assert!(lints("return <div onChange={f}></div>\n").contains(&"no_effect".to_string()));
@@ -4381,10 +4471,10 @@ mod tests {
     /// does on a line of its own.
     #[test]
     fn a_classed_child_on_the_line_of_its_box_keeps_the_layout_outside() {
-        let out = silk("return <div><p className=\"a\">x</p></div>\n");
+        let out = vide("return <div><p className=\"a\">x</p></div>\n");
 
         assert!(
-            out.contains("<UIListLayout SortOrder={Enum.SortOrder.LayoutOrder} />{__silk(function() return <TextLabel"),
+            out.contains("<__silk_child Class=\"UIListLayout\" SortOrder={Enum.SortOrder.LayoutOrder} />{__silk(function() return <TextLabel"),
             "{out}"
         );
     }
@@ -4421,8 +4511,73 @@ mod tests {
         assert!(out.contains("TextEditable={__silk_not(busy)}"), "{out}");
         assert!(out.contains("Visible={false}"), "{out}");
         assert!(
-            out.contains("local function __silk_not(v: any): any if type(v) == \"function\""),
+            out.contains(
+                "local function __silk_not(v: any, compute: any?): any if type(v) == \"function\""
+            ),
             "{out}"
+        );
+    }
+
+    /// A negated source and an escaped hole stay live in every
+    /// factory: the helpers map a React binding, and derive a Fusion
+    /// state through the `compute` of the factory.
+    #[test]
+    fn a_negated_source_takes_each_factory() {
+        let src = "return <div><button disabled={busy}>Go</button><p>Hi <b>{name}</b></p></div>\n";
+        let fusion = Options {
+            factory: Factory {
+                table: true,
+                create: Some("New".into()),
+                compute: Some(("computed".into(), "use".into())),
+            },
+            ..Options::default()
+        };
+        let out = apply(src, &run(src, "a.alx", &fusion).edits);
+
+        assert!(
+            out.contains("Interactable={__silk_not(busy, computed)}"),
+            "{out}"
+        );
+        let list = apply(
+            "return <div><p>a</p>{items}</div>\n",
+            &run("return <div><p>a</p>{items}</div>\n", "a.alx", &fusion).edits,
+        );
+        assert!(
+            list.contains("{__silk_order(items, 2000, computed)}"),
+            "{list}"
+        );
+        assert!(out.contains("{__silk_rich(name, computed)}"), "{out}");
+
+        let script = format!(
+            "{}{}\n{}",
+            not_text("__silk"),
+            rich_text("__silk"),
+            r#"
+local binding = { map = function(self, f) return f(true) end }
+assert(__silk_not(binding) == false)
+assert(__silk_rich({ map = function(self, f) return f("<b>") end }) == "&lt;b&gt;")
+local state = { type = "State" }
+local derived = __silk_not(state, function(f) return f(function(v) assert(v == state) return false end) end)
+assert(derived == true)
+assert(__silk_not(function() return false end)() == true)
+assert(__silk_not(false) == true)
+"#
+        );
+        let path = std::env::temp_dir().join(format!("silk-not-{}.luau", std::process::id()));
+        std::fs::write(&path, script).unwrap();
+        let run = std::process::Command::new("luau").arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        let Ok(out) = run else {
+            eprintln!("no luau on PATH: the helper run is skipped");
+
+            return;
+        };
+
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
         );
     }
 
@@ -4542,7 +4697,21 @@ mod tests {
             out.contains("{{ ref = __silk_viewport(1280, 720, 0.5, 2, nil) }}"),
             "{out}"
         );
+
         assert!(out.contains("<StyleLink StyleSheet="), "{out}");
+
+        // A body with a class takes one `ref` that runs both helpers.
+        let classed = DOCUMENT.replace("<body>", "<body className=\"card\">");
+        let out = apply(&classed, &run(&classed, "a.alx", &react).edits);
+        assert!(
+            out.contains("{{ ref = __silk(nil, \"card\", nil, nil, nil, __silk_viewport(1280, 720, 0.5, 2, nil)) }}"),
+            "{out}"
+        );
+        let out = apply(&classed, &run(&classed, "a.alx", &vide).edits);
+        assert!(
+            out.contains("{__silk_viewport(1280, 720, 0.5, 2, nil, function() return __silk(function() return <Frame Name={\"body\"}"),
+            "{out}"
+        );
 
         // A source reaches each property as it is.
         let src = "return <html><head><title>{name}</title><meta name=\"display-order\" content={order} /><meta name=\"ignore-inset\" content={full} /><meta name=\"reset-on-spawn\" /></head><body>{children}</body></html>\n";
@@ -4595,6 +4764,34 @@ mod tests {
             include_str!("../tests/viewport.luau")
         );
         let path = std::env::temp_dir().join(format!("silk-viewport-{}.luau", std::process::id()));
+        std::fs::write(&path, script).unwrap();
+        let run = std::process::Command::new("luau").arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        let Ok(out) = run else {
+            eprintln!("no luau on PATH: the helper run is skipped");
+
+            return;
+        };
+
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// The tag helper runs under `luau` against the mock of
+    /// `tests/helper.luau`, in both forms. A machine without `luau`
+    /// skips the run.
+    #[test]
+    fn the_tag_helper_runs_against_a_mock() {
+        let script = format!(
+            "{}\n{}",
+            helper_text("__silk"),
+            include_str!("../tests/helper.luau")
+        );
+        let path = std::env::temp_dir().join(format!("silk-helper-{}.luau", std::process::id()));
         std::fs::write(&path, script).unwrap();
         let run = std::process::Command::new("luau").arg(&path).output();
         let _ = std::fs::remove_file(&path);

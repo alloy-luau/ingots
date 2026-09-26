@@ -331,10 +331,9 @@ shows its swatch.
 
 ## Limits
 
-- Tags, links, `onChange`, and `maxLength` need a target whose elements
-  are instances, as Vide and Fusion build them: the helper calls `AddTag`
-  and connects `Activated` and the `Text` signal on the element. On
-  React, set `tags = false`.
+- The `order` helper sets `LayoutOrder` on the instances a hole or a
+  component gives. A React element is no instance, so under React a hole
+  or a component in a box keeps its own `LayoutOrder`; give it one.
 - A StyleRule overrides a property set on the instance. So a `<style>`
   rule wins over a `style` table, which is the reverse of CSS.
 - A rule sets `Size` and `FontFace` whole. A rule with `width` alone takes
