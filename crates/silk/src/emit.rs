@@ -166,6 +166,9 @@ struct Writer<'a> {
 /// Ranks for insertions at one offset: an outer opening comes first, an
 /// inner closing comes first.
 const RANK_PRELUDE: i64 = -10_000;
+/// The modifier and layout children of an element go before the wrapper
+/// of its first child, which can start at the same byte.
+const RANK_CHILDREN: i64 = 5;
 const RANK_WRAP_OPEN: i64 = 10;
 const RANK_RUN_OPEN: i64 = 20;
 const RANK_TEXT: i64 = 30;
@@ -1703,7 +1706,7 @@ impl<'a> Writer<'a> {
                 self.replace(s, t, text);
             }
 
-            None if !children.is_empty() => self.insert(e.open_end, RANK_RUN_OPEN - 5, children),
+            None if !children.is_empty() => self.insert(e.open_end, RANK_CHILDREN, children),
 
             None => {}
         }
@@ -3014,6 +3017,18 @@ mod tests {
         );
         assert!(
             out.contains("<Frame Name={\"tr\"}") && out.contains("LayoutOrder={2}"),
+            "{out}"
+        );
+    }
+
+    /// Game UI 12: a classed child on the line of its box compiles as it
+    /// does on a line of its own.
+    #[test]
+    fn a_classed_child_on_the_line_of_its_box_keeps_the_layout_outside() {
+        let out = silk("return <div><p className=\"a\">x</p></div>\n");
+
+        assert!(
+            out.contains("<UIListLayout SortOrder={Enum.SortOrder.LayoutOrder} />{__silk(function() return <TextLabel"),
             "{out}"
         );
     }
