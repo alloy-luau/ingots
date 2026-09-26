@@ -42,7 +42,8 @@ call for a `UIPadding` or a `UIStroke` fails the type check.
 | `opacity-*`, `hidden`, `z-*`, `order-*`, `rotate-*`, `scale-*` | transparencies, `Visible`, `ZIndex`, `LayoutOrder`, `Rotation`, `UIScale` |
 | `min-w-*`, `max-w-*`, `aspect-*` | `UISizeConstraint`, `UIAspectRatioConstraint` |
 | `object-cover`, `object-contain` | `ScaleType` |
-| `overflow-hidden`, `overflow-scroll`, `scrollbar-*` | `ClipsDescendants`, `ScrollingEnabled`, `ScrollBarThickness` |
+| `overflow-hidden`, `overflow-auto`, `overflow-y-auto`, `overflow-x-auto`, `scrollbar-*` | `ClipsDescendants`, `ScrollingEnabled`, `ScrollBarThickness`; on a Silk box, a ScrollingFrame |
+| `appearance-none` | nothing on a Roblox class; on a Silk control, no browser look |
 | `hover:`, `active:`, `focus:`, `group`, `group-hover:` | the state helper |
 | `transition`, `transition-colors`, `duration-300`, `duration-[0.3s]`, `ease-out`, `ease-back-in`, `delay-100` | a TweenService tween on each state change |
 | `w-[200px]`, `bg-[#ff0000]`, `text-[14px]` | arbitrary values |

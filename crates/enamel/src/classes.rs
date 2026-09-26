@@ -888,6 +888,10 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
             )],
             "this child stretched across its line",
         )),
+        "appearance-none" => Some(utility(
+            Vec::new(),
+            "Silk drops the look a browser gives a control; nothing to set",
+        )),
         "absolute" | "relative" | "fixed" | "static" | "sticky" => Some(utility(
             Vec::new(),
             "positions are always absolute on Roblox; nothing to set",
@@ -935,12 +939,11 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
             vec![prop("ClipsDescendants", "false", Needs::Gui)],
             "children may draw outside the element",
         )),
-        "overflow-auto" | "overflow-scroll" | "overflow-y-auto" | "overflow-y-scroll" => {
-            Some(utility(
-                vec![prop("ScrollingEnabled", "true", Needs::Scrolling)],
-                "the frame scrolls",
-            ))
-        }
+        "overflow-auto" | "overflow-scroll" | "overflow-y-auto" | "overflow-y-scroll"
+        | "overflow-x-auto" | "overflow-x-scroll" => Some(utility(
+            vec![prop("ScrollingEnabled", "true", Needs::Scrolling)],
+            "the frame scrolls",
+        )),
         "scrollbar-none" => Some(utility(
             vec![prop("ScrollBarThickness", "0", Needs::Scrolling)],
             "no scroll bar",
@@ -2998,6 +3001,9 @@ pub fn catalog(ctx: &Context) -> Vec<Entry> {
         "overflow-visible",
         "overflow-auto",
         "overflow-scroll",
+        "overflow-x-auto",
+        "overflow-y-auto",
+        "appearance-none",
         "scrollbar-none",
         "truncate",
         "text-clip",
@@ -3333,6 +3339,21 @@ mod tests {
         assert!(!takes_a_number("rounded-l"));
         assert!(!takes_a_number("bg-red-5"));
         assert!(!takes_a_number("justify-c"));
+    }
+
+    /// Silk reads `appearance-none` and the sideways overflow, so Enamel
+    /// knows them and reports no problem.
+    #[test]
+    fn the_classes_silk_reads_are_known() {
+        let r = resolved("TextButton", "appearance-none");
+        assert!(r.problems.is_empty() && r.props.is_empty(), "{r:?}");
+
+        let r = resolved("ScrollingFrame", "overflow-x-auto");
+        assert_eq!(
+            r.props,
+            [("ScrollingEnabled".to_string(), "true".to_string())]
+        );
+        assert!(r.problems.is_empty(), "{r:?}");
     }
 
     #[test]
