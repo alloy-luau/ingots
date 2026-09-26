@@ -16,7 +16,26 @@ pub struct Plan<'a> {
 
 pub fn plan<'a>(found: &'a Found, ctx: &Context) -> Plan<'a> {
     let classes: Vec<Class> = found.classes.iter().map(|(c, _)| Class::parse(c)).collect();
-    let element = Element::parse(&found.tag);
+    // Silk makes a ScrollingFrame of an HTML box with an overflow class.
+    let scrolls = found.classes.iter().any(|(c, _)| {
+        matches!(
+            c.as_str(),
+            "overflow-auto"
+                | "overflow-scroll"
+                | "overflow-y-auto"
+                | "overflow-y-scroll"
+                | "overflow-x-auto"
+                | "overflow-x-scroll"
+                | "scroll-x"
+                | "scroll-y"
+                | "scroll-xy"
+        )
+    });
+    let element = Element::parse(&found.tag).map(|e| match e {
+        Element::Frame if found.html && scrolls => Element::ScrollingFrame,
+
+        e => e,
+    });
     let resolved = element
         .map(|e| classes::resolve(e, &classes, ctx))
         .unwrap_or_default();
@@ -393,6 +412,22 @@ mod tests {
         let alx = serde_json::json!({ "factory": { "backend": "table", "compute": "computed" } });
         assert_eq!(factory(&alx), (true, Some("computed".into())));
         assert_eq!(factory(&serde_json::Value::Null), (false, None));
+    }
+
+    /// Silk makes a ScrollingFrame of an HTML box with an overflow class,
+    /// so the class fits and reports nothing.
+    #[test]
+    fn an_overflow_class_on_an_html_box_fits() {
+        let src = "return <div className=\"h-10 overflow-y-auto canvas-auto\"><p>a</p></div>\n";
+        let found = markup::find_all(src);
+        let plan = plan(&found[0], &Context::default());
+
+        assert_eq!(plan.element, Some(Element::ScrollingFrame));
+        assert!(
+            plan.resolved.problems.is_empty(),
+            "{:?}",
+            plan.resolved.problems
+        );
     }
 
     /// A lone hole in a text element is its Text. With children beside
