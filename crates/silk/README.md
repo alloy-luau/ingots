@@ -159,8 +159,11 @@ pseudo-elements, and at-rules report `unsupported_css`.
 
 In a project that loads Enamel, `className` holds both kinds of class.
 Silk passes the list to Enamel as `ClassName`, and Enamel writes its
-utilities. Silk leaves out its own background, padding, corner, border,
-and layout defaults where an Enamel utility sets them. Every class also
+utilities. Silk leaves out each default that a utility sets, and only
+that one: `text-white` replaces the text color and keeps the size of an
+`h1`, and `bg-gradient-to-b` adds a UIGradient and keeps the clear
+background. A class with a state variant, `hover:bg-red-500`, keeps the
+default for the resting look. Every class also
 becomes a tag, so `.card` in a `<style>` still matches. In the editor,
 Enamel completes and explains its utilities in `className`, and does not
 report a class it does not know on an HTML element, since that is a CSS

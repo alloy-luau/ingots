@@ -920,38 +920,36 @@ impl<'a> Writer<'a> {
         let text_class = matches!(class, "TextLabel" | "TextButton" | "TextBox");
 
         // Enamel reads the same classes; Silk leaves the properties its
-        // utilities set to it.
+        // utilities set to it, and a background the author wrote keeps
+        // its color.
         let class_tokens: Vec<&str> = ["class", "className"]
             .iter()
             .filter_map(|n| e.text(src, n))
             .flat_map(str::split_whitespace)
             .collect();
         let enamel = self.opts.enamel && !class_tokens.is_empty();
-        // A utility with a state variant applies on that state alone, so
-        // the element keeps the defaults for its resting look.
-        let has = |prefixes: &[&str]| {
-            enamel
-                && class_tokens.iter().any(|t| {
-                    !t.contains(':')
-                        && prefixes
-                            .iter()
-                            .any(|p| *t == *p || t.starts_with(&format!("{p}-")))
-                })
+        let mut replaced = match enamel {
+            true => crate::enamel::sets(class_tokens.iter().copied()),
+
+            false => HashSet::new(),
         };
-        let enamel_direction = has(&["flex", "inline-flex", "grid"]);
-        let enamel_arranges = has(&["gap", "justify", "items", "sort"]);
+
+        if e.attr("BackgroundColor3").is_some() {
+            replaced.insert("BackgroundTransparency".into());
+        }
+
+        let enamel_direction = [
+            crate::enamel::ROW,
+            crate::enamel::COLUMN,
+            crate::enamel::GRID,
+        ]
+        .iter()
+        .any(|k| replaced.contains(*k));
+        let enamel_arranges = replaced.contains(crate::enamel::ARRANGE);
         // Enamel lays out children in a row unless a class says the
         // direction; a box stacks them, so Silk asks for a column.
         let enamel_column = enamel_arranges && !enamel_direction;
         let enamel_layout = enamel_direction || enamel_arranges;
-        let enamel_padding = has(&["p", "px", "py", "pt", "pr", "pb", "pl"]);
-        let enamel_corner = has(&["rounded"]);
-        let enamel_stroke = has(&["border", "ring"]);
-        let enamel_bg = has(&["bg"]) || e.attr("BackgroundColor3").is_some();
-        let enamel_text = has(&["text"]);
-        let enamel_font = has(&["font", "italic", "not-italic"]);
-        let enamel_leading = has(&["leading"]);
-        let enamel_truncate = has(&["truncate", "whitespace"]);
 
         // ---- the defaults a browser gives the tag
         let text_look = html::text_style(tag.name);
@@ -979,7 +977,7 @@ impl<'a> Writer<'a> {
             _ => None,
         };
 
-        if !enamel_bg && class != "Sound" {
+        if class != "Sound" {
             match background {
                 Some(c) => {
                     d.set("BackgroundColor3", c);
@@ -1037,22 +1035,6 @@ impl<'a> Writer<'a> {
                 },
             );
         }
-
-        // The text defaults an Enamel utility sets itself.
-        d.props.retain(|(k, _)| {
-            !(enamel_text
-                && matches!(
-                    k.as_str(),
-                    "TextSize"
-                        | "TextColor3"
-                        | "TextTransparency"
-                        | "TextXAlignment"
-                        | "TextWrapped"
-                ))
-                && !(enamel_font && k == "FontFace")
-                && !(enamel_leading && k == "LineHeight")
-                && !(enamel_truncate && matches!(k.as_str(), "TextTruncate" | "TextWrapped"))
-        });
 
         if class == "TextBox" {
             d.set("ClearTextOnFocus", "false");
@@ -1205,17 +1187,9 @@ impl<'a> Writer<'a> {
             _ => {}
         }
 
-        if enamel_padding {
-            d.mods.retain(|(c, _)| *c != "UIPadding");
-        }
-
-        if enamel_corner {
-            d.mods.retain(|(c, _)| *c != "UICorner");
-        }
-
-        if enamel_stroke {
-            d.mods.retain(|(c, _)| *c != "UIStroke");
-        }
+        // The defaults a class of the element sets itself.
+        d.props.retain(|(k, _)| !replaced.contains(k));
+        d.mods.retain(|(c, _)| !replaced.contains(*c));
 
         // ---- the attributes
         let mut written: HashSet<String> = HashSet::new();
@@ -1420,7 +1394,7 @@ impl<'a> Writer<'a> {
             m.set("ScrollBarThickness", "6");
         }
 
-        if text_class && (!enamel_font || style.font.is_set()) {
+        if text_class {
             base_font = FontParts {
                 family: style.font.family.clone().or(base_font.family),
                 weight: style.font.weight.or(base_font.weight),
@@ -1689,7 +1663,7 @@ impl<'a> Writer<'a> {
         // ---- write the element
         let mut generated: Vec<(String, String)> = extra;
         generated.extend(m.props.iter().cloned());
-        generated.retain(|(k, _)| !written.contains(k));
+        generated.retain(|(k, _)| !written.contains(k) && !replaced.contains(k));
         let mut seen = HashSet::new();
         generated.retain(|(k, _)| seen.insert(k.clone()));
 
@@ -3053,6 +3027,45 @@ mod tests {
         );
         assert!(
             out.contains("<Frame Name={\"tr\"}") && out.contains("LayoutOrder={2}"),
+            "{out}"
+        );
+    }
+
+    fn with_enamel(src: &str) -> String {
+        let opts = Options {
+            enamel: true,
+            ..Options::default()
+        };
+
+        apply(src, &run(src, "a.alx", &opts).edits)
+    }
+
+    /// Game UI 9 and 16: a class drops only the defaults it sets. A text
+    /// color keeps the size and the alignment, and a gradient keeps the
+    /// clear background.
+    #[test]
+    fn a_class_drops_only_the_default_it_sets() {
+        let out = with_enamel("return <h1 className=\"text-white\">T</h1>\n");
+        assert!(out.contains("TextSize={32}"), "{out}");
+        assert!(out.contains("TextWrapped={true}"), "{out}");
+        assert!(
+            out.contains("TextXAlignment={Enum.TextXAlignment.Left}"),
+            "{out}"
+        );
+        assert!(!out.contains("TextColor3"), "{out}");
+
+        let out = with_enamel(
+            "return <h1 className=\"bg-gradient-to-b from-accent to-orange-500\">T</h1>\n",
+        );
+        assert!(out.contains("BackgroundTransparency={1}"), "{out}");
+
+        let out = with_enamel("return <button className=\"bg-red-500 stroke\">Go</button>\n");
+        assert!(
+            !out.contains("BackgroundColor3") && !out.contains("BackgroundTransparency"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("<UIStroke") && out.contains("<UICorner"),
             "{out}"
         );
     }
