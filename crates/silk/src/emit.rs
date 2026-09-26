@@ -3746,15 +3746,30 @@ return not v end "
 
 /// The order helper as one line of Alloy. It sets `LayoutOrder` on what
 /// a `{ }` child or a component gives: an instance, each instance of a
-/// list in its own order, or, for a function a reactive library runs
-/// again, what the function returns each time.
+/// list, or, for a function a reactive library runs again, what the
+/// function returns each time.
+///
+/// An item of a list takes its place in the list, unless it sets its
+/// own `LayoutOrder`. Vide's `values` gives its items in the order of a
+/// hash, and an item binds `LayoutOrder` to its index to keep the order
+/// of the list. So the helper adds the place of the hole to the order an
+/// item gives, and again each time the item changes it. `own` holds that
+/// order per item, and `false` for an item that gives none. An order of
+/// 1000 or more runs into the next place, as for [`HOLE_STEP`].
 pub fn order_text(helper: &str) -> String {
     format!(
-        "local function {helper}_order(v: any, k: number, compute: any?): any \
+        "local {helper}_own: {{ [any]: any }} = setmetatable({{}}, {{ __mode = \"k\" }}) :: any \
+local function {helper}_order(v: any, k: number, compute: any?): any \
 if type(v) == \"function\" then local f: any = v return function() return {helper}_order(f(), k) end end \
 if type(v) == \"table\" and compute ~= nil and v.type == \"State\" then local derive: any = compute return derive(function(use: any) return {helper}_order(use(v), k) end) end \
-local list: any = if typeof(v) == \"Instance\" then {{ v }} elseif type(v) == \"table\" then v else {{}} \
-for n, c in ipairs(list) do local g: any = c if typeof(c) == \"Instance\" and (g :: any):IsA(\"GuiObject\") then (g :: any).LayoutOrder = k + n - 1 end end \
+if typeof(v) == \"Instance\" then local g: any = v if g:IsA(\"GuiObject\") then g.LayoutOrder = k end return v end \
+if type(v) ~= \"table\" then return v end \
+for n, c in ipairs(v) do local g: any = c if typeof(c) == \"Instance\" and g:IsA(\"GuiObject\") then \
+local s: any = {helper}_own[g] \
+if s == nil then s = if g.LayoutOrder ~= 0 then {{ own = g.LayoutOrder, base = k, wrote = 0 }} else false {helper}_own[g] = s \
+if s then g:GetPropertyChangedSignal(\"LayoutOrder\"):Connect(function() local t: any = {helper}_own[g] \
+if g.LayoutOrder ~= t.wrote then t.own = g.LayoutOrder t.wrote = t.base + t.own g.LayoutOrder = t.wrote end end) end end \
+if s then s.base = k s.wrote = k + s.own g.LayoutOrder = s.wrote else g.LayoutOrder = k + n - 1 end end end \
 return v end "
     )
 }
@@ -4894,6 +4909,60 @@ assert(__silk_not(false) == true)
             include_str!("../tests/viewport.luau")
         );
         let path = std::env::temp_dir().join(format!("silk-viewport-{}.luau", std::process::id()));
+        std::fs::write(&path, script).unwrap();
+        let run = std::process::Command::new("luau").arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        let Ok(out) = run else {
+            eprintln!("no luau on PATH: the helper run is skipped");
+
+            return;
+        };
+
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// LANG_BUGS 65: the items of `vide.values` come in the order of a
+    /// hash, and each binds `LayoutOrder` to its index. The order helper
+    /// adds the place of the hole to that order and follows it. Each
+    /// factory writes the one helper; `tests/order.luau` runs it under
+    /// `luau`, and a machine without `luau` skips the run.
+    #[test]
+    fn a_list_item_keeps_the_order_it_binds() {
+        let src = "return <div className=\"flex-col\">\n  {vide.values(lines, function(line, index)\n    return <p LayoutOrder={index}>{line}</p>\n  end)}\n</div>\n";
+        let fusion = Options {
+            factory: Factory {
+                table: true,
+                create: Some("New".into()),
+                compute: Some(("computed".into(), "use".into())),
+            },
+            ..Options::default()
+        };
+
+        for (out, tail) in [
+            (vide(src), "end), 1000)}"),
+            (
+                apply(src, &run(src, "a.alx", &fusion).edits),
+                "end), 1000, computed)}",
+            ),
+            (silk(src), "end), 1000)}"),
+        ] {
+            assert!(out.contains("{__silk_order(vide.values("), "{out}");
+            assert!(out.contains(tail), "{out}");
+            assert!(out.contains("local __silk_own"), "{out}");
+            assert!(out.contains("LayoutOrder={index}"), "{out}");
+        }
+
+        let script = format!(
+            "{}\n{}",
+            order_text("__silk"),
+            include_str!("../tests/order.luau")
+        );
+        let path = std::env::temp_dir().join(format!("silk-order-{}.luau", std::process::id()));
         std::fs::write(&path, script).unwrap();
         let run = std::process::Command::new("luau").arg(&path).output();
         let _ = std::fs::remove_file(&path);

@@ -110,6 +110,21 @@ give, on each instance of a list in turn, and again each time a
 function child runs. In a box that holds a hole, one place is 1000
 numbers wide, so a list in the hole keeps its own order.
 
+An item of a list that sets its own `LayoutOrder` keeps that order in
+the place of the hole. The helper adds the place to the order of the
+item, and does it again each time the item changes its order. An item
+with no order takes its place in the list. Vide's `values` returns its
+items in no fixed order, so each item binds the index that `values`
+gives it:
+
+```alx
+<div className="flex-col">
+    {vide.values(lines, function(line: string, index: () -> number)
+        return <p LayoutOrder={index}>{line}</p>
+    end)}
+</div>
+```
+
 A child that places itself stands out of the flow, as `position:
 absolute` does in CSS. It has a `Position` attribute, `position:
 absolute` or `fixed`, an offset such as `top` or `inset`, or an Enamel
