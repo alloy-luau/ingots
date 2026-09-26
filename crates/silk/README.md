@@ -78,9 +78,9 @@ A box that holds only text becomes a TextLabel. A `{ }` hole is not text:
 it may hold elements, as `{children}` does. So `<div>{name}</div>` stays
 a Frame and shows nothing. Write `<p>{name}</p>`, or text beside the
 hole, as in `<div>Name: {name}</div>`. A hole beside a `Text` you write
-is a child too: `<button Text={label}>{icon}</button>`. A text element that holds
-boxes becomes a Frame, and each run of its text becomes a TextLabel of its
-own. An element with `onClick` becomes a button: a Frame is a TextButton,
+is a child too: `<button Text={label}>{icon}</button>`. A text element
+that holds boxes becomes a Frame, and each run of its text becomes a
+TextLabel of its own. An element with `onClick` becomes a button: a Frame is a TextButton,
 and an ImageLabel is an ImageButton.
 
 Each child of a box takes the `LayoutOrder` of its place, so the
@@ -184,18 +184,20 @@ utilities. Silk leaves out each default that a utility sets, and only
 that one: `text-white` replaces the text color and keeps the size of an
 `h1`, and `bg-gradient-to-b` adds a UIGradient and keeps the clear
 background. A class with a state variant, `hover:bg-red-500`, keeps the
-default for the resting look. A class of the project's `enamel.aly`
-counts as the utilities or the properties behind it, so `panel =
-'bg-glass/75 rounded-2xl stroke'` replaces the background, the corner,
-and the border of a `<button className="panel">`. A `w-` or `h-` class
-replaces the size on
-its axis. Silk then passes its own size on the other axis to Enamel as
-a class, so `<div className="w-full">` keeps its automatic height as
-`w-full h-0 h-auto`. Every class also
-becomes a tag, so `.card` in a `<style>` still matches. In the editor,
-Enamel completes and explains its utilities in `className`, and does not
-report a class it does not know on an HTML element, since that is a CSS
-class.
+default for the resting look.
+
+A class of the project's `enamel.aly` counts as the utilities or the
+properties behind it. With `panel = 'bg-glass/75 rounded-2xl stroke'`,
+the class replaces the background, the corner, and the border of a
+`<button className="panel">`. A `w-` or `h-` class replaces the size
+on its axis, and Silk passes its own size on the other axis to Enamel
+as a class: `<div className="w-full">` keeps its automatic height as
+`w-full h-0 h-auto`.
+
+Every class also becomes a tag, so `.card` in a `<style>` still
+matches. In the editor, Enamel completes and explains its utilities in
+`className`, and does not report a class it does not know on an HTML
+element, since that is a CSS class.
 
 ## The table form
 
