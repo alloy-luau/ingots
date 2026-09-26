@@ -37,9 +37,7 @@ impl Handler for Silk {
         self.opts.enamel = settings.ingots.iter().any(|n| n == "enamel");
         self.theme_file = (self.opts.enamel && !settings.root.is_empty())
             .then(|| std::path::Path::new(&settings.root).join("enamel.aly"));
-        self.opts.table =
-            std::fs::read_to_string(std::path::Path::new(&settings.root).join("alloy.toml"))
-                .is_ok_and(|toml| emit::table_form(&toml));
+        self.opts.factory = emit::factory(std::path::Path::new(&settings.root));
 
         if let Some(h) = text("helper") {
             self.opts.helper = h;

@@ -27,9 +27,8 @@ pub struct Options {
     pub color: Rgba,
     /// The classes of the project's `enamel.aly`.
     pub theme: crate::enamel::Theme,
-    /// Whether the project lowers markup in the table form,
-    /// `create(name)(props)`, as Vide and Fusion do.
-    pub table: bool,
+    /// The markup factory of the project.
+    pub factory: Factory,
 }
 
 impl Default for Options {
@@ -47,7 +46,7 @@ impl Default for Options {
                 a: 1.0,
             },
             theme: crate::enamel::Theme::new(),
-            table: false,
+            factory: Factory::default(),
         }
     }
 }
@@ -1350,7 +1349,7 @@ impl<'a> Writer<'a> {
 
                         // Vide types each event's handler by its signal, so a
                         // `() -> ()` for `Activated` fails the type check.
-                        if let (true, Value::Expr(s, t)) = (self.opts.table, a.value) {
+                        if let (true, Value::Expr(s, t)) = (self.opts.factory.table, a.value) {
                             self.uses_on = true;
                             let on = format!("{}_on(", self.opts.helper);
                             self.insert(s, RANK_WRAP_OPEN, on);
@@ -1875,12 +1874,12 @@ impl<'a> Writer<'a> {
             .map(|(k, v)| format!(" {k}={{{v}}}"))
             .collect();
         // Vide's factory has no VideoFrame and no Sound either.
-        let (open_tag, close_tag) = match self.opts.table && matches!(class, "VideoFrame" | "Sound")
-        {
-            true => (self.child_tag(class), format!("{}_child", self.opts.helper)),
+        let (open_tag, close_tag) =
+            match self.opts.factory.table && matches!(class, "VideoFrame" | "Sound") {
+                true => (self.child_tag(class), format!("{}_child", self.opts.helper)),
 
-            false => (class.to_string(), class.to_string()),
-        };
+                false => (class.to_string(), class.to_string()),
+            };
         self.replace(e.name_span.0, e.name_span.1, format!("{open_tag}{attrs}"));
 
         if let Some((s, _)) = e.close {
@@ -1974,7 +1973,7 @@ impl<'a> Writer<'a> {
     /// table form the child component makes it: Vide types its factory
     /// over 19 classes, so `create("UIPadding")` fails the type check.
     fn child_tag(&mut self, class: &str) -> String {
-        match self.opts.table {
+        match self.opts.factory.table {
             true => {
                 self.uses_child = true;
 
@@ -2921,47 +2920,70 @@ local h: any = f return function(...) h(...) end end "
     )
 }
 
-/// Whether `alloy.toml` lowers markup in the table form,
-/// `create(name)(props)`, as Vide and Fusion do. It reads `[alx.factory]
-/// backend` as a table, an inline table, or a dotted key, as Enamel does.
-// ponytail: a factory set in `.config.aly` or `luaux.toml` keeps the
-// Roblox tags. Read the factory from the host once init carries it.
-pub fn table_form(toml: &str) -> bool {
-    let mut table = String::new();
+/// The markup factory of a project: what `[alx.factory]` sets.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Factory {
+    /// `backend = "table"`: a tag lowers to `create(name)(props)`, as
+    /// Vide, Fluid, and Fusion take it. Else the element form, React's.
+    pub table: bool,
+    /// The function a tag calls: `vide.create`, `New`.
+    pub create: Option<String>,
+    /// `compute`, which wraps a value that reads Fusion state, and `use`,
+    /// the reader inside it.
+    pub compute: Option<(String, String)>,
+}
 
-    for line in toml.lines() {
-        let line = line.split('#').next().unwrap_or("").trim();
+/// The factory of the project at `root`. Alloy reads `alloy.toml`, else
+/// `.config.aly`, and reads `luaux.toml` when that file sets no factory.
+pub fn factory(root: &std::path::Path) -> Factory {
+    let read = |name: &str| std::fs::read_to_string(root.join(name)).ok();
+    let set = |f: &Factory| f.table || f.create.is_some();
 
-        if let Some(name) = line.strip_prefix('[') {
-            table = name.trim_end_matches(']').trim().to_string();
+    read("alloy.toml")
+        .or_else(|| read(".config.aly"))
+        .map(|t| factory_of(&t))
+        .filter(set)
+        .or_else(|| read("luaux.toml").map(|t| factory_of(&t)))
+        .unwrap_or_default()
+}
 
-            continue;
-        }
+/// The factory a configuration text sets. It reads `key = "value"` in
+/// TOML and in the table of a `.config.aly`, so it takes `[alx.factory]`,
+/// `alx.factory.backend`, and `factory = { backend = 'table' }` alike.
+// ponytail: a key named `backend`, `create`, `compute`, or `use` in
+// another table of the file reads as the factory's. Read the factory from
+// the host once init carries it.
+pub fn factory_of(text: &str) -> Factory {
+    let code: String = text
+        .lines()
+        .map(|l| {
+            let cut = [l.find('#'), l.find("--")].into_iter().flatten().min();
 
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let key = match table.as_str() {
-            "" => key.trim().to_string(),
+            &l[..cut.unwrap_or(l.len())]
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let value = |key: &str| -> Option<String> {
+        code.match_indices(key).find_map(|(at, _)| {
+            let bounded = !code[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
+            let rest = code[at + key.len()..].trim_start().strip_prefix('=')?;
+            let rest = rest.trim_start();
+            let quote = rest.chars().next().filter(|q| matches!(q, '"' | '\''))?;
+            let body = &rest[1..];
+            let end = body.find(quote)?;
 
-            t => format!("{t}.{}", key.trim()),
-        };
-        let value: String = value
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .map(|c| if c == '\'' { '"' } else { c })
-            .collect();
+            bounded.then(|| body[..end].to_string())
+        })
+    };
 
-        match key.as_str() {
-            "alx.factory.backend" => return value == "\"table\"",
-
-            "alx.factory" => return value.contains("backend=\"table\""),
-
-            _ => {}
-        }
+    Factory {
+        table: value("backend").as_deref() == Some("table"),
+        create: value("create"),
+        compute: value("compute").map(|c| (c, value("use").unwrap_or_else(|| "use".into()))),
     }
-
-    false
 }
 
 /// Applies edits the way the host does, for tests.
@@ -3582,7 +3604,10 @@ mod tests {
     #[test]
     fn the_table_form_writes_what_a_typed_factory_takes() {
         let opts = Options {
-            table: true,
+            factory: Factory {
+                table: true,
+                ..Factory::default()
+            },
             ..Options::default()
         };
         let src = "return <div>\n<style>.a { color: red }</style>\n<button onClick={go}>Go</button>\n<video src=\"x\" onMouseEnter={go} />\n</div>\n";
@@ -3618,14 +3643,58 @@ mod tests {
             "{out}"
         );
 
-        assert!(table_form(
+        let table = |t: &str| factory_of(t).table;
+        assert!(table(
             "[build]\nin = \"src\"\n\n[alx.factory]\nbackend = \"table\" # Vide\n"
         ));
-        assert!(table_form(
+        assert!(table(
             "[alx]\nfactory = { backend = 'table', create = 'create' }\n"
         ));
-        assert!(table_form("alx.factory.backend = \"table\"\n"));
-        assert!(!table_form("[alx.factory]\nbackend = \"element\"\n"));
+        assert!(table("alx.factory.backend = \"table\"\n"));
+        assert!(!table("[alx.factory]\nbackend = \"element\"\n"));
+    }
+
+    /// The factory reads from `alloy.toml`, `.config.aly`, and
+    /// `luaux.toml`, in the order Alloy reads them.
+    #[test]
+    fn the_factory_reads_each_config_file() {
+        let aly = "export default {\n  alx = {\n    -- backend = 'element'\n    factory = { backend = 'table', create = 'vide.create' },\n  },\n}\n";
+        assert_eq!(
+            factory_of(aly),
+            Factory {
+                table: true,
+                create: Some("vide.create".into()),
+                compute: None
+            }
+        );
+
+        let fusion =
+            "[alx.factory]\nbackend = \"table\"\ncreate = \"New\"\ncompute = \"computed\"\n";
+        assert_eq!(
+            factory_of(fusion).compute,
+            Some(("computed".into(), "use".into()))
+        );
+        assert!(!factory_of("[alx.factory]\ncreate = \"React.createElement\"\n").table);
+        assert_eq!(factory_of("recreate = \"x\"\n").create, None);
+
+        let root = std::env::temp_dir().join(format!("silk-factory-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".config.aly"), aly).unwrap();
+        std::fs::write(
+            root.join("luaux.toml"),
+            "[factory]\nbackend = \"element\"\n",
+        )
+        .unwrap();
+        let from_aly = factory(&root);
+        std::fs::write(root.join("alloy.toml"), "[build]\nin = \"src\"\n").unwrap();
+        let from_luaux = factory(&root);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(from_aly.table, "{from_aly:?}");
+        assert!(
+            !from_luaux.table,
+            "an alloy.toml with no factory reads luaux.toml"
+        );
     }
 
     /// Game UI 12: a classed child on the line of its box compiles as it
