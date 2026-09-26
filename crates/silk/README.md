@@ -77,7 +77,8 @@ reads it, so `--name` and `{` mean CSS there. The React form works too:
 A box that holds only text becomes a TextLabel. A `{ }` hole is not text:
 it may hold elements, as `{children}` does. So `<div>{name}</div>` stays
 a Frame and shows nothing. Write `<p>{name}</p>`, or text beside the
-hole, as in `<div>Name: {name}</div>`. A text element that holds
+hole, as in `<div>Name: {name}</div>`. A hole beside a `Text` you write
+is a child too: `<button Text={label}>{icon}</button>`. A text element that holds
 boxes becomes a Frame, and each run of its text becomes a TextLabel of its
 own. An element with `onClick` becomes a button: a Frame is a TextButton,
 and an ImageLabel is an ImageButton.

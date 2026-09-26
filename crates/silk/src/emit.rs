@@ -1561,8 +1561,10 @@ impl<'a> Writer<'a> {
 
         // ---- the order of the children
         let has_holes = !holes.is_empty();
-        // A hole in a box is a child, as `{children}` is, and not text.
-        let holes_are_children = matches!(kind, Kind::Block | Kind::List | Kind::Table | Kind::Row);
+        // A hole in a box is a child, as `{children}` is, and not text. So
+        // is a hole beside a `Text` the author wrote.
+        let holes_are_children = matches!(kind, Kind::Block | Kind::List | Kind::Table | Kind::Row)
+            || written.contains("Text");
         let flow = matches!(kind, Kind::Block | Kind::List | Kind::Table) || demoted || button_row;
         // A table row orders its cells; the table's layout places them.
         let ordered = flow || kind == Kind::Row;
@@ -1621,7 +1623,11 @@ impl<'a> Writer<'a> {
                     || (has_holes && !holes_are_children)
                     || marker.is_some()
                     || written.contains("Text");
-                let nodes = !m.mods.is_empty() || !boxes.is_empty() || (flow && !boxes.is_empty());
+                // Enamel adds modifier and layout children of its own.
+                let enamel_children = replaced
+                    .iter()
+                    .any(|k| k.starts_with("UI") || k.starts_with("layout:"));
+                let nodes = !m.mods.is_empty() || !boxes.is_empty() || enamel_children;
 
                 // Holes alone beside element children are ambiguous to the
                 // markup compiler; one hole moves to `Text`.
@@ -3412,6 +3418,21 @@ mod tests {
             lints("return <p>Hi <b className=\"x\">there</b></p>\n")
                 .contains(&"no_effect".to_string())
         );
+    }
+
+    /// Game UI 20: a hole beside a `Text` the author wrote is a child, in
+    /// a fragment so the markup compiler does not read it as text.
+    #[test]
+    fn a_hole_beside_text_is_a_child() {
+        let out = silk("return <button Text={label}>{grow}</button>\n");
+        assert!(out.contains("Text={label}"), "{out}");
+        assert!(out.contains("<>{grow}</>"), "{out}");
+
+        // A lone hole in a button whose classes replace every modifier
+        // still moves to Text: Enamel adds the modifiers back as children.
+        let out =
+            with_enamel("return <button className=\"p-2 rounded-xl border-0\">{x}</button>\n");
+        assert!(out.contains("Text={x}"), "{out}");
     }
 
     /// Game UI 12: a classed child on the line of its box compiles as it
