@@ -291,19 +291,50 @@ matches. In the editor, Enamel completes and explains its utilities in
 `className`, and does not report a class it does not know on an HTML
 element, since that is a CSS class.
 
-## The table form
+## Each factory
 
-Vide and Fusion use the table form of `[alx.factory]`. The host sends
+Silk writes for each `[alx.factory]` that Alloy lowers. The host sends
 the factory at init, from `alloy.toml` or `.config.aly` alike. An older
-host sends none, and Silk takes the element form. Vide types its factory over 19 classes, with no UIPadding, UIStroke,
+host sends none, and Silk takes the element form, as Alloy does with no
+`[alx]`.
+
+The table form, `create(name)(props)`, is for Vide, Fluid, and Fusion.
+Vide types its factory over 19 classes, with no UIPadding, UIStroke,
 StyleLink, VideoFrame, or Sound, and types each event's handler by its
 signal. So in the table form, Silk writes each child it adds, and each
 `<video>` and `<audio>`, as the `__silk_child` component, which calls
 `Instance.new`. A child with a Luau value from `style` also takes
 `Make`, the `create` of the factory, so the library binds a source in
-it. It passes each handler through `__silk_on`, so a
-`() -> ()` fits `Activated`. The element form, for React, keeps the
-Roblox tags and the handlers as written.
+it. Silk passes each handler through `__silk_on`, so a `() -> ()` fits
+`Activated`. A helper that needs the instance builds the element
+inside a function it calls once.
+
+The element form, `React.createElement(name, props, children)`, is for
+React. It keeps the Roblox tags and the handlers as written. A React
+element is no instance, so a helper that needs the instance takes it as
+a `ref`, through a spread: `{{ ref = __silk(nil, "card", ...) }}`. React
+calls the `ref` again on each render, so the helper sets up once for
+each instance and keeps the latest handler. Enamel runs this `ref` from
+inside its own.
+
+A reactive value reaches the helpers in the shape of its library: a
+Vide or Fluid source is a function, a React binding has `map`, and a
+Fusion state derives through the `compute` of the factory, which Silk
+passes to the helper when the project sets one.
+
+| Feature | Vide, Fluid (table) | Fusion (table, `compute`) | React (element) |
+| --- | --- | --- | --- |
+| `<html>`, `<head>`, `<title>`, `<meta>`, `<body>` | yes | yes | yes |
+| the viewport scale | the helper builds the body | the helper builds the body | a `ref` |
+| a box with a child that places itself, `overflow-y-auto`, `appearance: none`, `border-image` | yes | yes | yes |
+| a Luau value in `style` | yes, a source stays live | yes, a state stays live | yes, a binding stays live |
+| `className` tags, `href`, `onChange`, `maxLength` | the helper builds the element | the helper builds the element | a `ref` |
+| `disabled`, `hidden`, `readOnly` of a reactive value | a function | through `compute` | `map` |
+| a `{ }` hole in RichText | a function | through `compute` | `map` |
+| the order of a hole or a component in a box | yes | yes | no: a React element has no `LayoutOrder` to set |
+
+`interpolate = "plain"` and `"wrap"` both work: Silk writes the same
+markup, and Alloy lowers its text.
 
 ## Options
 
