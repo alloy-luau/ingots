@@ -373,6 +373,24 @@ pub fn is_class(name: &str) -> bool {
     CLASSES.binary_search(&name).is_ok()
 }
 
+/// The creatable classes that are a GuiObject: a layout places them, and
+/// they have `LayoutOrder`. A UICorner or a UIScale is none of them.
+pub fn is_gui_object(name: &str) -> bool {
+    matches!(
+        name,
+        "CanvasGroup"
+            | "Frame"
+            | "ImageButton"
+            | "ImageLabel"
+            | "ScrollingFrame"
+            | "TextBox"
+            | "TextButton"
+            | "TextLabel"
+            | "VideoFrame"
+            | "ViewportFrame"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

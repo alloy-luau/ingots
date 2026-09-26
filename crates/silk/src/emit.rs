@@ -349,7 +349,8 @@ impl<'a> Writer<'a> {
     }
 
     /// The children that stand as their own boxes: not folded, not a
-    /// `<style>`, and not removed.
+    /// `<style>`, not removed, and not a Roblox modifier such as a
+    /// UIScale, which a layout does not place.
     fn boxes(&self, i: usize) -> Vec<usize> {
         self.m
             .element_children(i)
@@ -358,6 +359,11 @@ impl<'a> Writer<'a> {
                 !self
                     .tag(*k)
                     .is_some_and(|t| matches!(t.kind, Kind::Style | Kind::Removed | Kind::Break))
+            })
+            .filter(|k| {
+                let name = &self.el(*k).name;
+
+                !roblox::is_class(name) || roblox::is_gui_object(name)
             })
             .collect()
     }
@@ -402,7 +408,7 @@ impl<'a> Writer<'a> {
                 // only the props it declares.
                 if let Some(k) = self.order.get(&i).copied()
                     && e.attr("LayoutOrder").is_none()
-                    && roblox::is_class(&e.name)
+                    && roblox::is_gui_object(&e.name)
                 {
                     self.insert(e.name_span.1, RANK_TEXT, format!(" LayoutOrder={{{k}}}"));
                 }
@@ -3031,6 +3037,24 @@ mod tests {
             out.contains("<UIListLayout SortOrder={Enum.SortOrder.LayoutOrder} />{__silk(function() return <TextLabel"),
             "{out}"
         );
+    }
+
+    /// Game UI 15: a Roblox modifier inside a Silk tag takes no order
+    /// and is no box beside the text.
+    #[test]
+    fn a_roblox_modifier_is_no_box() {
+        let out = silk("return <button>\n  Play\n  <UIScale Scale={1.2} />\n</button>\n");
+
+        assert!(out.contains("<UIScale Scale={1.2} />"), "{out}");
+        assert!(
+            !out.contains("<TextLabel"),
+            "the text stays the button's: {out}"
+        );
+        assert!(!out.contains("UIListLayout"), "{out}");
+
+        let out = silk("return <div><p>a</p><UIGradient /><Frame /></div>\n");
+        assert!(out.contains("<UIGradient />"), "{out}");
+        assert!(out.contains("<Frame LayoutOrder={2} />"), "{out}");
     }
 
     /// Game UI 28: a block comment holds no tag, as a line comment does.
