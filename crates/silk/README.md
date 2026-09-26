@@ -91,6 +91,23 @@ give, on each instance of a list in turn, and again each time a
 function child runs. In a box that holds a hole, one place is 1000
 numbers wide, so a list in the hole keeps its own order.
 
+A child that places itself stands out of the flow, as `position:
+absolute` does in CSS. It has a `Position` attribute, `position:
+absolute` or `fixed`, an offset such as `top` or `inset`, or an Enamel
+class such as `absolute`, `inset-0`, or `center`. A UIListLayout would
+move that child, so its box writes no layout, and each child stands
+where it places itself, as in a Roblox Frame. A layout that the author
+asks for, `display: flex` or a `flex` class, stays. A button keeps its
+text beside such a child. So a screen of layers is a box of absolute
+children:
+
+```alx
+<div className="w-full h-full">
+    <div className="absolute inset-0">{background}</div>
+    <main className="center w-[640px] p-6">...</main>
+</div>
+```
+
 A child of a flex or a grid box is an item of its own, as CSS makes it:
 `<div className="flex"><span>L</span><span>R</span></div>` is a Frame
 with two TextLabels in a row. An inline tag with a class keeps its own
@@ -309,5 +326,6 @@ shows its swatch.
 - A type selector matches the instance's `Name`. An element with an `id`
   has that `id` as its `Name`, so `h1` does not match `<h1 id="title">`;
   `#title` does.
-- A UIListLayout places every child, so `position: absolute` inside a box
-  that stacks its children does not take the child out of the flow.
+- A Roblox Frame has a layout for all its children or for none. When one
+  child places itself, the others stand at the top left of the box.
+  Put the children that flow in a box of their own.

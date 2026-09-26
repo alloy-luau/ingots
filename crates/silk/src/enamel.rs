@@ -23,6 +23,8 @@ pub const ARRANGE: &str = "layout:arrange";
 /// inside the `Size` the tag writes, so Silk's height stays.
 pub const SIZE_X: &str = "size:x";
 pub const SIZE_Y: &str = "size:y";
+/// `absolute` and `fixed`: the element places itself, out of the flow.
+pub const PLACED: &str = "position:placed";
 /// `w-auto`: the X axis of `AutomaticSize`, which starts at 0.
 pub const AUTO_X: &str = "auto:x";
 pub const AUTO_Y: &str = "auto:y";
@@ -262,6 +264,7 @@ fn utility(base: &str) -> &'static [&'static str] {
         "h-auto" | "h-fit" | "h-max" | "h-min" => &[AUTO_Y],
         "size-auto" | "size-fit" => &[AUTO_X, AUTO_Y],
         "center" => &["Position", "AnchorPoint"],
+        "absolute" | "fixed" => &[PLACED],
         _ => &[],
     };
 

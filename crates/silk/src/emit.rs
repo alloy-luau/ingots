@@ -396,7 +396,9 @@ impl<'a> Writer<'a> {
             let item = e.parent.is_some_and(|p| self.lays_out_items(p));
             let classed = e.attr("className").or(e.attr("class")).is_some();
 
+            // An element that places itself is out of the text's flow.
             self.foldable[i] = !events
+                && !self.places_itself(i)
                 && e.hole_owner.is_none_or(|_| e.parent.is_some())
                 && e.parent.is_some()
                 && children_fold
@@ -438,6 +440,41 @@ impl<'a> Writer<'a> {
                 .any(|k| k.starts_with("layout:") && k != crate::enamel::ARRANGE);
 
         display || enamel
+    }
+
+    /// Whether an element places itself: a `Position` attribute,
+    /// `position: absolute` or `fixed`, an offset such as `top`, or an
+    /// Enamel class that sets a position, as `absolute` and `inset-0` do.
+    fn places_itself(&self, i: usize) -> bool {
+        let e = self.el(i);
+        let decls: Vec<css::Decl> = decls_of(self.src, e)
+            .into_iter()
+            .chain(self.static_decls(i))
+            .collect();
+        let mode = decls
+            .iter()
+            .rev()
+            .find(|d| d.name == "position")
+            .map(|d| d.value.trim().to_ascii_lowercase());
+        let offset = decls.iter().any(|d| {
+            matches!(
+                d.name.as_str(),
+                "top" | "left" | "right" | "bottom" | "inset"
+            )
+        });
+        let css = matches!(mode.as_deref(), Some("absolute" | "fixed"))
+            || (offset && mode.as_deref() != Some("static"));
+        let classes = ["class", "className"]
+            .iter()
+            .filter_map(|n| e.text(self.src, n))
+            .flat_map(str::split_whitespace);
+        let enamel = self.opts.enamel && {
+            let keys = crate::enamel::sets(classes, &self.opts.theme);
+
+            keys.contains("Position") || keys.contains(crate::enamel::PLACED)
+        };
+
+        e.attr("Position").is_some() || css || enamel
     }
 
     fn has_literal(&self, i: usize) -> bool {
@@ -1264,6 +1301,12 @@ impl<'a> Writer<'a> {
                                         | "flex-direction"
                                         | "height"
                                         | "max-height"
+                                        | "position"
+                                        | "top"
+                                        | "left"
+                                        | "right"
+                                        | "bottom"
+                                        | "inset"
                                 )
                             })
                             .cloned(),
@@ -1282,6 +1325,15 @@ impl<'a> Writer<'a> {
         let input_type_owned = e.text(src, "type").map(str::to_ascii_lowercase);
         let input_type = input_type_owned.as_deref();
         let boxes = self.boxes(i);
+        // A child that places itself stands out of the flow, as a CSS
+        // `position: absolute` does. A UIListLayout would move it, so a box
+        // with one writes no layout of its own, and its text stays its own.
+        let placed = boxes.iter().any(|k| self.places_itself(*k));
+        let flow_boxes: Vec<usize> = boxes
+            .iter()
+            .copied()
+            .filter(|k| !self.places_itself(*k))
+            .collect();
         let holds_text = self.holds_text(i);
         let holes: Vec<(usize, usize)> = e
             .children
@@ -1297,9 +1349,9 @@ impl<'a> Writer<'a> {
         let mut kind = tag.kind;
 
         match kind {
-            Kind::Block if holds_text && boxes.is_empty() => kind = Kind::Text,
+            Kind::Block if holds_text && flow_boxes.is_empty() => kind = Kind::Text,
 
-            Kind::Text | Kind::Cell | Kind::Inline if !boxes.is_empty() => kind = Kind::Block,
+            Kind::Text | Kind::Cell | Kind::Inline if !flow_boxes.is_empty() => kind = Kind::Block,
 
             _ => {}
         }
@@ -1308,11 +1360,11 @@ impl<'a> Writer<'a> {
             matches!(tag.kind, Kind::Text | Kind::Cell | Kind::Inline) && kind == Kind::Block;
         // A button or a link that holds a box, an icon beside its text,
         // lays both out in a row.
-        let button_row = matches!(tag.kind, Kind::Button | Kind::Link) && !boxes.is_empty();
+        let button_row = matches!(tag.kind, Kind::Button | Kind::Link) && !flow_boxes.is_empty();
         // Text beside a box stands in a TextLabel of its own, as a
         // browser puts it in an anonymous box.
         let wrap_runs = holds_text
-            && !boxes.is_empty()
+            && !flow_boxes.is_empty()
             && (demoted
                 || button_row
                 || matches!(
@@ -2220,6 +2272,7 @@ impl<'a> Writer<'a> {
         } else if flow
             && !enamel_layout
             && layout_kind != Some(Layout::None)
+            && !(placed && matches!(layout_kind, None | Some(Layout::Flow)))
             && (!e.children.is_empty())
         {
             let class_name = match layout_kind {
@@ -4488,6 +4541,42 @@ mod tests {
             "return <html><head><meta name=\"theme-color\" content=\"#fff\" /><meta name=\"viewport\" content=\"width=10\" /></head></html>\n",
         );
         assert!(lints.contains(&"no_effect".to_string()), "{lints:?}");
+    }
+
+    /// A child that places itself stands out of the flow, so its box
+    /// writes no layout: a UIListLayout would move it.
+    #[test]
+    fn a_placed_child_turns_the_layout_off() {
+        let out = silk(
+            "return <div><p>a</p><div style={{ position = \"absolute\", top = 0 }}>b</div></div>\n",
+        );
+        assert!(!out.contains("UIListLayout"), "{out}");
+
+        let out = silk("return <div><Frame Position={UDim2.new()} /><p>a</p></div>\n");
+        assert!(!out.contains("UIListLayout"), "{out}");
+
+        let out = with_enamel(
+            "return <div className=\"w-full\">{children}<div className=\"absolute inset-0\" /></div>\n",
+        );
+        assert!(!out.contains("UIListLayout"), "{out}");
+
+        // A button keeps its text beside a badge that places itself.
+        let out = with_enamel(
+            "return <button>Play<span className=\"absolute top-0 right-0\">new</span></button>\n",
+        );
+        assert!(!out.contains("UIListLayout"), "{out}");
+        assert!(!out.contains("Name={\"text\"}"), "{out}");
+        assert!(out.contains(">Play<"), "{out}");
+
+        // A layout the author asks for stays.
+        let out = silk(
+            "return <div style={{ display = \"flex\" }}><span style={{ position = \"absolute\" }}>x</span></div>\n",
+        );
+        assert!(out.contains("UIListLayout"), "{out}");
+
+        // `position: relative` with no offset flows.
+        let out = silk("return <div><p style={{ position = \"relative\" }}>a</p><p>b</p></div>\n");
+        assert!(out.contains("UIListLayout"), "{out}");
     }
 
     #[test]
