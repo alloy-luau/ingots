@@ -266,6 +266,8 @@ fn parse_decls_clean(t: &str, base: usize) -> Vec<Decl> {
 const UNITLESS: &[&str] = &[
     "animation-iteration-count",
     "aspect-ratio",
+    "border-transparency",
+    "gradient-rotation",
     "column-count",
     "columns",
     "flex",
@@ -462,9 +464,13 @@ pub fn parse_table(text: &str, base: usize) -> (Vec<Decl>, Vec<Problem>) {
 /// Roblox property behind it, which takes the value as it is.
 pub const DYNAMIC: &[&str] = &[
     "background-color",
+    "background-gradient",
     "border-color",
+    "border-transparency",
     "border-width",
     "color",
+    "gradient-rotation",
+    "gradient-transparency",
     "rotate",
     "scale",
     "z-index",

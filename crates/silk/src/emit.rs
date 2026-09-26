@@ -2047,6 +2047,14 @@ impl<'a> Writer<'a> {
 
                 "border-width" => ("UIStroke", "Thickness"),
 
+                "border-transparency" => ("UIStroke", "Transparency"),
+
+                "background-gradient" => ("UIGradient", "Color"),
+
+                "gradient-rotation" => ("UIGradient", "Rotation"),
+
+                "gradient-transparency" => ("UIGradient", "Transparency"),
+
                 _ => continue,
             };
 
@@ -2065,6 +2073,37 @@ impl<'a> Writer<'a> {
 
             if class == "UIStroke" {
                 m.modifier(class, "ApplyStrokeMode", "Enum.ApplyStrokeMode.Border");
+            }
+        }
+
+        // A live gradient takes its direction from `gradientRotation`, or
+        // from an Enamel direction class, `bg-gradient-to-b`. Silk writes
+        // the one UIGradient, so the class leaves the list Enamel reads.
+        // The box shows white under it, as a CSS gradient shows.
+        if dynamic
+            .iter()
+            .any(|(n, v, _)| n == "background-gradient" && !v.contains('\n'))
+        {
+            let rotated = m
+                .mods
+                .iter()
+                .any(|(c, p)| *c == "UIGradient" && p.iter().any(|(k, _)| k == "Rotation"));
+
+            if let Some((span, deg)) = self.gradient_direction(i).filter(|_| self.opts.enamel) {
+                if !rotated {
+                    m.modifier("UIGradient", "Rotation", css::num(deg));
+                }
+
+                self.replace(span.0, span.1, "");
+            }
+
+            let shown = m.get("BackgroundColor3").is_some()
+                || replaced.contains("BackgroundColor3")
+                || written.contains("BackgroundColor3");
+
+            if !shown {
+                m.set("BackgroundColor3", "Color3.new(1, 1, 1)");
+                m.set("BackgroundTransparency", "0");
             }
         }
 
@@ -2627,6 +2666,45 @@ impl<'a> Writer<'a> {
             self.insert(e.start, RANK_WRAP_OPEN, pre);
             self.insert(e.end, RANK_WRAP_CLOSE, format!("{post}{close}"));
         }
+    }
+
+    /// The span of an Enamel direction class in the class list of an
+    /// element, `bg-gradient-to-b`, and the rotation it names, as Enamel
+    /// reads it.
+    fn gradient_direction(&self, i: usize) -> Option<((usize, usize), f64)> {
+        let e = self.el(i);
+        let (s, t) = ["className", "class"]
+            .iter()
+            .find_map(|n| match e.attr(n)?.value {
+                Value::Str(s, t) => Some((s, t)),
+
+                _ => None,
+            })?;
+        let text = &self.src[s..t];
+        let mut at = 0;
+
+        for word in text.split_whitespace() {
+            let start = at + text[at..].find(word)?;
+            at = start + word.len();
+            let Some(side) = word.strip_prefix("bg-gradient-to-") else {
+                continue;
+            };
+            let deg = match side {
+                "r" => 0.0,
+                "br" => 45.0,
+                "b" => 90.0,
+                "bl" => 135.0,
+                "l" => 180.0,
+                "tl" => 225.0,
+                "t" => 270.0,
+                "tr" => 315.0,
+                _ => continue,
+            };
+
+            return Some(((s + start, s + at), deg));
+        }
+
+        None
     }
 
     /// The end of a call of the negation, the escape, or the order
@@ -5114,6 +5192,70 @@ assert(__silk_not(false) == true)
             "{out}"
         );
         assert!(out.contains(" /></__silk_child>"), "{out}");
+    }
+
+    /// A live stroke transparency and a live gradient reach their
+    /// modifier, so a source stays live. The gradient's direction is
+    /// `gradientRotation` or an Enamel direction class, which then leaves
+    /// the list so Enamel writes no second UIGradient.
+    #[test]
+    fn a_live_stroke_transparency_and_gradient_reach_their_modifier() {
+        let out = silk(
+            "return <button style={{ borderColor = color, borderTransparency = fade, borderWidth = 2 }}>Go</button>\n",
+        );
+        assert!(
+            out.contains("<UIStroke Color={color} Thickness={2} ApplyStrokeMode={Enum.ApplyStrokeMode.Border} Transparency={fade} />"),
+            "{out}"
+        );
+
+        // A literal is 0 to 1, as the Roblox property takes it.
+        let out = silk(
+            "return <div style={{ border = \"1px solid #fff\", borderTransparency = 0.8 }} />\n",
+        );
+        assert!(out.contains("Transparency={0.8}"), "{out}");
+
+        let out = silk(
+            "return <div style={{ backgroundGradient = sky, gradientRotation = 90, gradientTransparency = fade }} />\n",
+        );
+        assert!(
+            out.contains("<UIGradient Rotation={90} Color={sky} Transparency={fade} />"),
+            "{out}"
+        );
+        assert!(
+            out.contains("BackgroundTransparency={0} BackgroundColor3={Color3.new(1, 1, 1)}"),
+            "{out}"
+        );
+
+        // An Enamel direction class gives the rotation, and leaves the list.
+        let src = "return <div className=\"w-full h-full bg-white bg-gradient-to-b\" style={{ backgroundGradient = sky }} />\n";
+        let out = with_enamel(src);
+        assert!(
+            out.contains("<UIGradient Color={sky} Rotation={90} />"),
+            "{out}"
+        );
+        assert!(
+            out.contains("ClassName=\"w-full h-full bg-white \""),
+            "{out}"
+        );
+        assert!(
+            !out.contains("BackgroundColor3={Color3.new(1, 1, 1)}"),
+            "{out}"
+        );
+
+        // The table form builds the live gradient through the factory.
+        let out = vide(
+            "return <button className=\"bg-white\" style={{ backgroundGradient = track }}>Go</button>\n",
+        );
+        assert!(
+            out.contains("<__silk_child Class=\"UIGradient\" Color={track} Make={vide.create} />"),
+            "{out}"
+        );
+
+        // A literal gradient is CSS: the Luau name reports.
+        assert!(
+            lints("return <div style={{ backgroundGradient = \"red\" }} />\n")
+                .contains(&"bad_value".to_string())
+        );
     }
 
     #[test]

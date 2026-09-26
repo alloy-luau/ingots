@@ -413,6 +413,26 @@ pub fn catalog() -> Vec<Known> {
         ),
         K("border-color", "`UIStroke.Color`", &[]),
         K(
+            "border-transparency",
+            "`UIStroke.Transparency`, 0 to 1; takes a source",
+            &[],
+        ),
+        K(
+            "background-gradient",
+            "a `UIGradient`'s `Color`: a Luau ColorSequence, or a source of one",
+            &[],
+        ),
+        K(
+            "gradient-rotation",
+            "the `UIGradient`'s `Rotation`, in degrees",
+            &[],
+        ),
+        K(
+            "gradient-transparency",
+            "the `UIGradient`'s `Transparency`: a Luau NumberSequence, or a source of one",
+            &[],
+        ),
+        K(
             "border-image",
             "a `UIGradient` inside the `UIStroke`, for `linear-gradient()`",
             &["none"],
@@ -959,6 +979,38 @@ pub fn apply(decls: &[Decl], ctx: &Ctx, out: &mut Out) {
                     None => bad(out),
                 }
             }
+
+            // Roblox's own axis of a stroke, 0 to 1, which a source can
+            // drive as it is: `borderTransparency = fade`.
+            "border-transparency" => match v.parse::<f64>() {
+                Ok(t) => {
+                    out.modifier("UIStroke", "Transparency", num(t.clamp(0.0, 1.0)));
+                    out.modifier("UIStroke", "ApplyStrokeMode", "Enum.ApplyStrokeMode.Border");
+                }
+
+                Err(_) => bad(out),
+            },
+
+            "gradient-rotation" => match css::degrees(v).or_else(|| v.parse().ok()) {
+                Some(deg) => out.modifier("UIGradient", "Rotation", num(deg)),
+
+                None => bad(out),
+            },
+
+            // A live gradient takes Luau alone; a literal one is CSS.
+            "background-gradient" | "gradient-transparency" => out.problem(
+                span,
+                "bad_value",
+                format!(
+                    "`{}` takes a Luau value, a {}; write a literal gradient as `background: linear-gradient(...)`",
+                    d.name,
+                    match d.name.as_str() {
+                        "background-gradient" => "ColorSequence",
+
+                        _ => "NumberSequence",
+                    }
+                ),
+            ),
 
             "border-style" => match lower.as_str() {
                 "none" | "hidden" => out.modifier("UIStroke", "Enabled", "false"),

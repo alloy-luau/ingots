@@ -54,6 +54,19 @@ Silk follows React where React and HTML differ:
   value is what the Roblox property takes, a `Color3` or a number, and
   a source stays live: `style={{ scale = grow }}` sets the `Scale` of
   a UIScale. Another property takes a literal alone.
+- `borderTransparency` sets the `Transparency` of the UIStroke, from 0
+  to 1, as a literal or as a Luau value. CSS has no property for the
+  alpha of a border apart from its color. The name is Roblox's, and
+  the value is the Roblox value, so a source of any library passes to
+  the stroke as it is, with no helper to invert it. Enamel's
+  `stroke-transparency-*` uses the same word.
+- A live gradient is Luau: `backgroundGradient` takes a ColorSequence
+  or a source of one, and `gradientTransparency` a NumberSequence or a
+  source of one. The direction is static: `gradientRotation` in
+  degrees, or an Enamel class such as `bg-gradient-to-b`, which Silk
+  then reads in place of Enamel. A box with no background color shows
+  white under the gradient, as CSS shows a gradient. A gradient of
+  literal colors is CSS: `background: linear-gradient(...)`.
 - Text takes HTML character references: `&copy;`, `&nbsp;`, `&mdash;`,
   `&#169;`.
 
@@ -327,7 +340,7 @@ passes to the helper when the project sets one.
 | `<html>`, `<head>`, `<title>`, `<meta>`, `<body>` | yes | yes | yes |
 | the viewport scale | the helper builds the body | the helper builds the body | a `ref` |
 | a box with a child that places itself, `overflow-y-auto`, `appearance: none`, `border-image` | yes | yes | yes |
-| a Luau value in `style` | yes, a source stays live | yes, a state stays live | yes, a binding stays live |
+| a Luau value in `style`, `borderTransparency`, `backgroundGradient` | yes, a source stays live | yes, a state stays live | yes, a binding stays live |
 | `className` tags, `href`, `onChange`, `maxLength` | the helper builds the element | the helper builds the element | a `ref` |
 | `disabled`, `hidden`, `readOnly` of a reactive value | a function | through `compute` | `map` |
 | a `{ }` hole in RichText | a function | through `compute` | `map` |
