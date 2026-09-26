@@ -6,7 +6,19 @@ use silk::emit;
 fn main() {
     let path = std::env::args().nth(1).expect("a .alx file");
     let source = std::fs::read_to_string(&path).expect("a readable file");
-    let out = emit::run(&source, &path, &emit::Options::default());
+    // `SILK_TABLE=1` lowers as the table form, and `SILK_ENAMEL=1` as a
+    // project that loads Enamel.
+    let on = |name: &str| std::env::var(name).is_ok_and(|v| v == "1");
+    let opts = emit::Options {
+        factory: emit::Factory {
+            table: on("SILK_TABLE"),
+            create: Some("create".into()),
+            compute: None,
+        },
+        enamel: on("SILK_ENAMEL"),
+        ..emit::Options::default()
+    };
+    let out = emit::run(&source, &path, &opts);
     let mut text = String::new();
     let mut cursor = 0usize;
 

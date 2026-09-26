@@ -849,6 +849,19 @@ impl<'a> Writer<'a> {
 
             false => HashSet::new(),
         };
+        // The values move to the open tag, and an edit keeps its line count.
+        if name.as_ref().is_some_and(|n| n.contains('\n'))
+            || props.iter().any(|(_, v)| v.contains('\n'))
+        {
+            self.find(
+                "dynamic_style",
+                e.name_span,
+                "a title or a meta value on more than one line cannot move to the ScreenGui; bind it to a local and write the name",
+            );
+            name = name.filter(|n| !n.contains('\n'));
+            props.retain(|(_, v)| !v.contains('\n'));
+        }
+
         let mut generated = vec![
             (
                 "Name".to_string(),
@@ -1765,6 +1778,38 @@ impl<'a> Writer<'a> {
             d.set("BackgroundTransparency", "1");
         }
 
+        // A Luau value in `style` goes to the one property behind it, so a
+        // source stays live: `style={{ scale = grow }}`. A property of the
+        // element takes the value where the `style` stands.
+        let dynamic = match e.attr("style").map(|a| a.value) {
+            Some(Value::Expr(s, t)) => css::dynamic_table(&src[s..t], s),
+
+            _ => Vec::new(),
+        };
+        let mut in_place: Vec<(&'static str, String)> = Vec::new();
+
+        for (name, value, _) in &dynamic {
+            let key = match name.as_str() {
+                "background-color" => "BackgroundColor3",
+
+                "color" if target == Target::Image => "ImageColor3",
+
+                "color" => "TextColor3",
+
+                "rotate" => "Rotation",
+
+                "z-index" => "ZIndex",
+
+                _ => continue,
+            };
+            in_place.push((key, value.clone()));
+
+            // A background color shows the box.
+            if key == "BackgroundColor3" && d.get("BackgroundTransparency") == Some("1") {
+                in_place.push(("BackgroundTransparency", "0".into()));
+            }
+        }
+
         // ---- the attributes
         let mut written: HashSet<String> = HashSet::new();
         let mut extra: Vec<(String, String)> = Vec::new();
@@ -1772,6 +1817,9 @@ impl<'a> Writer<'a> {
         let mut tags_expr: Option<String> = None;
         let mut href: Option<String> = None;
         let mut change: Option<String> = None;
+        // The handler stays where it stands until the helper takes it: an
+        // edit keeps its line count, so a handler on more lines cannot move.
+        let mut change_span: Option<(usize, usize)> = None;
         let mut limit: Option<String> = None;
 
         for a in &e.attrs {
@@ -1924,12 +1972,26 @@ impl<'a> Writer<'a> {
 
                     n if html::is_change(n) => {
                         change = Some(raw.luau());
-                        self.remove_attr(a.span);
+                        change_span = Some(a.span);
                     }
 
                     n if n.eq_ignore_ascii_case("maxlength") => {
                         limit = Some(raw.luau().trim_matches('"').to_string());
                         self.remove_attr(a.span);
+                    }
+
+                    "style" if !in_place.is_empty() => {
+                        let text = in_place
+                            .iter()
+                            .map(|(k, v)| format!("{k}={{{v}}}"))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        self.replace(a.span.0, a.span.1, text);
+                        self.cover_span(a.span);
+
+                        for (k, _) in &in_place {
+                            written.insert((*k).to_string());
+                        }
                     }
 
                     _ => self.remove_attr(a.span),
@@ -1962,48 +2024,37 @@ impl<'a> Writer<'a> {
         m.opacity = style.opacity;
         props::finish_colors(&mut m, target, false);
 
-        // A Luau value in `style` goes to the one property behind it, so a
-        // source stays live: `style={{ scale = grow }}`.
+        // A Luau value for a modifier goes to its child. The child stands
+        // past the open tag, and an edit keeps its line count, so a value
+        // on more than one line stays out.
         let mut live: HashSet<&'static str> = HashSet::new();
-        let dynamic = match e.attr("style").map(|a| a.value) {
-            Some(Value::Expr(s, t)) => css::dynamic_table(&src[s..t]),
 
-            _ => Vec::new(),
-        };
+        for (name, value, span) in &dynamic {
+            let (class, key) = match name.as_str() {
+                "scale" => ("UIScale", "Scale"),
 
-        for (name, value) in dynamic {
-            match name.as_str() {
-                "scale" => {
-                    m.modifier("UIScale", "Scale", value);
-                    live.insert("UIScale");
-                }
+                "border-color" => ("UIStroke", "Color"),
 
-                "border-color" | "border-width" => {
-                    let key = match name.as_str() {
-                        "border-color" => "Color",
+                "border-width" => ("UIStroke", "Thickness"),
 
-                        _ => "Thickness",
-                    };
-                    m.modifier("UIStroke", key, value);
-                    m.modifier("UIStroke", "ApplyStrokeMode", "Enum.ApplyStrokeMode.Border");
-                    live.insert("UIStroke");
-                }
+                _ => continue,
+            };
 
-                "background-color" => {
-                    m.set("BackgroundColor3", value);
+            if value.contains('\n') {
+                self.find(
+                    "dynamic_style",
+                    *span,
+                    format!("a value for `{name}` on more than one line cannot move to its {class}; bind it to a local and write the name"),
+                );
 
-                    if m.get("BackgroundTransparency") == Some("1") {
-                        m.set("BackgroundTransparency", "0");
-                    }
-                }
+                continue;
+            }
 
-                "color" if target == Target::Image => m.set("ImageColor3", value),
+            m.modifier(class, key, value.clone());
+            live.insert(class);
 
-                "color" => m.set("TextColor3", value),
-
-                "rotate" => m.set("Rotation", value),
-
-                _ => m.set("ZIndex", value),
+            if class == "UIStroke" {
+                m.modifier(class, "ApplyStrokeMode", "Enum.ApplyStrokeMode.Border");
             }
         }
 
@@ -2440,7 +2491,16 @@ impl<'a> Writer<'a> {
 
                 false => fit.unwrap_or_else(nil),
             };
-            attrs.push_str(&format!(" {{{{ ref = {reference} }}}}"));
+            let spread = format!("{{{{ ref = {reference} }}}}");
+
+            match change_span.take() {
+                Some(span) => {
+                    self.replace(span.0, span.1, spread);
+                    self.cover_span(span);
+                }
+
+                None => attrs.push_str(&format!(" {spread}")),
+            }
         }
 
         // Vide's factory has no VideoFrame and no Sound either.
@@ -2498,6 +2558,10 @@ impl<'a> Writer<'a> {
             None if !children.is_empty() => self.insert(e.open_end, RANK_CHILDREN, children),
 
             None => {}
+        }
+
+        if let Some(span) = change_span {
+            self.remove_attr(span);
         }
 
         // ---- the helper: tags, a link, a change, and the viewport. The
@@ -4331,6 +4395,15 @@ mod tests {
         let out = vide("return <textarea onInput={name} className=\"x\"></textarea>\n");
         assert!(out.contains(" end, \"x\", nil, name, nil)"), "{out}");
 
+        // A handler on more lines stays where it stands, inside the `ref`.
+        let out = silk("return <input\n  onChange={function(t)\n    f(t)\n  end}\n/>\n");
+        assert!(
+            out.contains(
+                "{{ ref = __silk(nil, nil, nil, function(t)\n    f(t)\n  end, nil, nil) }}"
+            ),
+            "{out}"
+        );
+
         assert!(lints("return <div onChange={f}></div>\n").contains(&"no_effect".to_string()));
         assert!(!lints("return <input maxLength=\"4\" />\n").contains(&"no_effect".to_string()));
     }
@@ -4797,6 +4870,20 @@ assert(__silk_not(false) == true)
             "return <html><head><meta name=\"theme-color\" content=\"#fff\" /><meta name=\"viewport\" content=\"width=10\" /></head></html>\n",
         );
         assert!(lints.contains(&"no_effect".to_string()), "{lints:?}");
+
+        // A value on more lines cannot move to the open tag.
+        let src = "return <html><head><meta name=\"display-order\" content={if a\n  then 1 else 2} /></head><body /></html>\n";
+        assert!(
+            silk(src).contains(
+                "<ScreenGui Name={\"html\"} ZIndexBehavior={Enum.ZIndexBehavior.Sibling}>"
+            )
+        );
+        assert!(
+            run(src, "a.alx", &Options::default())
+                .findings
+                .iter()
+                .any(|f| f.lint == "dynamic_style")
+        );
     }
 
     /// A child that places itself stands out of the flow, so its box
@@ -4934,6 +5021,21 @@ assert(__silk_not(false) == true)
                 "{text}"
             );
         }
+
+        // A value on more lines stays where it stands, so the file keeps
+        // its lines. A modifier cannot take it there.
+        let out = silk(
+            "return <button style={{ color = function()\n  return c()\nend, scale = function()\n  return 1\nend }}>Go</button>\n",
+        );
+        assert!(
+            out.contains("TextColor3={function()\n  return c()\nend}"),
+            "{out}"
+        );
+        assert!(!out.contains("UIScale"), "{out}");
+        assert!(
+            lints("return <p style={{ scale = function()\n  return 1\nend }}>a</p>\n")
+                .contains(&"dynamic_style".to_string())
+        );
 
         // A property with no single Roblox property behind it stays a
         // compile-time value.

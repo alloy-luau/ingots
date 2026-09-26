@@ -471,15 +471,14 @@ pub const DYNAMIC: &[&str] = &[
 ];
 
 /// The fields of a `style` table whose value is Luau and not a literal,
-/// for the properties of [`DYNAMIC`]: the CSS name and the expression.
-pub fn dynamic_table(text: &str) -> Vec<(String, String)> {
-    let Some(inner) = text
-        .trim()
-        .strip_prefix('{')
-        .and_then(|r| r.strip_suffix('}'))
-    else {
+/// for the properties of [`DYNAMIC`]: the CSS name, the expression, and
+/// its span in a file where the table starts at `base`.
+pub fn dynamic_table(text: &str, base: usize) -> Vec<(String, String, (usize, usize))> {
+    let trimmed = text.trim();
+    let Some(inner) = trimmed.strip_prefix('{').and_then(|r| r.strip_suffix('}')) else {
         return Vec::new();
     };
+    let inner_base = base + (text.len() - text.trim_start().len()) + 1;
 
     fields(inner)
         .into_iter()
@@ -493,13 +492,16 @@ pub fn dynamic_table(text: &str) -> Vec<(String, String)> {
                 .trim()
                 .trim_matches(|c| c == '"' || c == '\'');
             let name = kebab(key);
-            let value = field[eq + 1..].trim();
+            let raw = &field[eq + 1..];
+            let value = raw.trim();
+            let at = inner_base + s + eq + 1 + (raw.len() - raw.trim_start().len());
             let quoted = value.len() >= 2
                 && (value.starts_with('"') && value.ends_with('"')
                     || value.starts_with('\'') && value.ends_with('\''));
             let literal = quoted || value.parse::<f64>().is_ok();
 
-            (DYNAMIC.contains(&name.as_str()) && !literal).then(|| (name, value.to_string()))
+            (DYNAMIC.contains(&name.as_str()) && !literal)
+                .then(|| (name, value.to_string(), (at, at + value.len())))
         })
         .collect()
 }
