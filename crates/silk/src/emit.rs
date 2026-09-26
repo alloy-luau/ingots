@@ -3479,7 +3479,7 @@ if tags ~= nil then for tag in string.gmatch(tags, \"%S+\") do el:AddTag(tag) en
 if first and (change ~= nil or limit ~= nil) then el:GetPropertyChangedSignal(\"Text\"):Connect(function() \
 local cut = if s.limit ~= nil then utf8.offset(el.Text, s.limit + 1) else nil \
 if cut ~= nil and cut <= #el.Text then el.Text = string.sub(el.Text, 1, cut - 1) return end \
-local call: any = s.change if call ~= nil then call(el.Text) end end) end \
+local call: any = s.change if s.change ~= nil then call(el.Text) end end) end \
 if first and href ~= nil then el.Activated:Connect(function() \
 local link: string = s.href \
 local root = el while root.Parent ~= nil and root.Parent:IsA(\"GuiBase2d\") do root = root.Parent end \
@@ -3499,8 +3499,8 @@ local build: any = make return apply(build()) end "
 /// sheet once, however often the component renders.
 pub fn sheet_text(helper: &str) -> String {
     format!(
-        "local {helper}_sheets: {{ [string]: Instance }} = {{}} \
-local function {helper}_sheet(id: string, rules: {{ {{ any }} }}): Instance \
+        "local {helper}_sheets: {{ [string]: StyleSheet }} = {{}} \
+local function {helper}_sheet(id: string, rules: {{ {{ any }} }}): StyleSheet \
 local sheet = {helper}_sheets[id] if sheet ~= nil then return sheet end \
 sheet = Instance.new(\"StyleSheet\") sheet.Name = id \
 for _, r in rules do local rule = Instance.new(\"StyleRule\") rule.Selector = r[1] rule.Priority = r[2] rule:SetProperties(r[3]) rule.Parent = sheet end \
@@ -3547,7 +3547,7 @@ pub fn rich_text(helper: &str) -> String {
     format!(
         "local function {helper}_rich(v: any, compute: any?): any \
 if type(v) == \"function\" then local f: any = v return function() return {helper}_rich(f()) end end \
-if type(v) == \"table\" and v.map ~= nil then return v:map(function(x: any) return {helper}_rich(x) end) end \
+if type(v) == \"table\" and v.map ~= nil then local b: any = v return b:map(function(x: any) return {helper}_rich(x) end) end \
 if type(v) == \"table\" and compute ~= nil then local derive: any = compute return derive(function(use: any) return {helper}_rich(use(v)) end) end \
 return (string.gsub(string.gsub(string.gsub(tostring(v), \"&\", \"&amp;\"), \"<\", \"&lt;\"), \">\", \"&gt;\")) end "
     )
@@ -3561,7 +3561,7 @@ pub fn not_text(helper: &str) -> String {
     format!(
         "local function {helper}_not(v: any, compute: any?): any \
 if type(v) == \"function\" then local f: any = v return function() return not f() end end \
-if type(v) == \"table\" and v.map ~= nil then return v:map(function(x: any) return not x end) end \
+if type(v) == \"table\" and v.map ~= nil then local b: any = v return b:map(function(x: any) return not x end) end \
 if type(v) == \"table\" and compute ~= nil then local derive: any = compute return derive(function(use: any) return not use(v) end) end \
 return not v end "
     )
@@ -3654,56 +3654,23 @@ pub struct Factory {
     pub compute: Option<(String, String)>,
 }
 
-/// The factory of the project at `root`. Alloy reads `alloy.toml`, else
-/// `.config.aly`, and reads `luaux.toml` when that file sets no factory.
-pub fn factory(root: &std::path::Path) -> Factory {
-    let read = |name: &str| std::fs::read_to_string(root.join(name)).ok();
-    let set = |f: &Factory| f.table || f.create.is_some();
+impl Factory {
+    /// The factory in the `[alx]` table the host sends at init. It comes
+    /// from `alloy.toml` or `.config.aly` alike. An old host sends none,
+    /// and Silk takes the element form, as Alloy does with no `[alx]`.
+    pub fn from_alx(alx: &serde_json::Value) -> Self {
+        let text = |key: &str| {
+            alx["factory"]
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
 
-    read("alloy.toml")
-        .or_else(|| read(".config.aly"))
-        .map(|t| factory_of(&t))
-        .filter(set)
-        .or_else(|| read("luaux.toml").map(|t| factory_of(&t)))
-        .unwrap_or_default()
-}
-
-/// The factory a configuration text sets. It reads `key = "value"` in
-/// TOML and in the table of a `.config.aly`, so it takes `[alx.factory]`,
-/// `alx.factory.backend`, and `factory = { backend = 'table' }` alike.
-// ponytail: a key named `backend`, `create`, `compute`, or `use` in
-// another table of the file reads as the factory's. Read the factory from
-// the host once init carries it.
-pub fn factory_of(text: &str) -> Factory {
-    let code: String = text
-        .lines()
-        .map(|l| {
-            let cut = [l.find('#'), l.find("--")].into_iter().flatten().min();
-
-            &l[..cut.unwrap_or(l.len())]
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let value = |key: &str| -> Option<String> {
-        code.match_indices(key).find_map(|(at, _)| {
-            let bounded = !code[..at]
-                .chars()
-                .next_back()
-                .is_some_and(|c| c.is_alphanumeric() || c == '_');
-            let rest = code[at + key.len()..].trim_start().strip_prefix('=')?;
-            let rest = rest.trim_start();
-            let quote = rest.chars().next().filter(|q| matches!(q, '"' | '\''))?;
-            let body = &rest[1..];
-            let end = body.find(quote)?;
-
-            bounded.then(|| body[..end].to_string())
-        })
-    };
-
-    Factory {
-        table: value("backend").as_deref() == Some("table"),
-        create: value("create"),
-        compute: value("compute").map(|c| (c, value("use").unwrap_or_else(|| "use".into()))),
+        Self {
+            table: text("backend").as_deref() == Some("table"),
+            create: text("create"),
+            compute: text("compute").map(|c| (c, text("use").unwrap_or_else(|| "use".into()))),
+        }
     }
 }
 
@@ -4412,25 +4379,14 @@ mod tests {
             out.contains("<UIPadding ") && out.contains("Activated={go}"),
             "{out}"
         );
-
-        let table = |t: &str| factory_of(t).table;
-        assert!(table(
-            "[build]\nin = \"src\"\n\n[alx.factory]\nbackend = \"table\" # Vide\n"
-        ));
-        assert!(table(
-            "[alx]\nfactory = { backend = 'table', create = 'create' }\n"
-        ));
-        assert!(table("alx.factory.backend = \"table\"\n"));
-        assert!(!table("[alx.factory]\nbackend = \"element\"\n"));
     }
 
-    /// The factory reads from `alloy.toml`, `.config.aly`, and
-    /// `luaux.toml`, in the order Alloy reads them.
+    /// The factory comes from the `[alx]` table the host sends at init.
     #[test]
-    fn the_factory_reads_each_config_file() {
-        let aly = "export default {\n  alx = {\n    -- backend = 'element'\n    factory = { backend = 'table', create = 'vide.create' },\n  },\n}\n";
+    fn the_factory_comes_from_the_host() {
+        let vide = serde_json::json!({ "factory": { "backend": "table", "create": "vide.create", "compute": null } });
         assert_eq!(
-            factory_of(aly),
+            Factory::from_alx(&vide),
             Factory {
                 table: true,
                 create: Some("vide.create".into()),
@@ -4438,32 +4394,19 @@ mod tests {
             }
         );
 
-        let fusion =
-            "[alx.factory]\nbackend = \"table\"\ncreate = \"New\"\ncompute = \"computed\"\n";
+        let fusion = serde_json::json!({ "factory": { "backend": "table", "create": "New", "compute": "computed" } });
         assert_eq!(
-            factory_of(fusion).compute,
+            Factory::from_alx(&fusion).compute,
             Some(("computed".into(), "use".into()))
         );
-        assert!(!factory_of("[alx.factory]\ncreate = \"React.createElement\"\n").table);
-        assert_eq!(factory_of("recreate = \"x\"\n").create, None);
 
-        let root = std::env::temp_dir().join(format!("silk-factory-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join(".config.aly"), aly).unwrap();
-        std::fs::write(
-            root.join("luaux.toml"),
-            "[factory]\nbackend = \"element\"\n",
-        )
-        .unwrap();
-        let from_aly = factory(&root);
-        std::fs::write(root.join("alloy.toml"), "[build]\nin = \"src\"\n").unwrap();
-        let from_luaux = factory(&root);
-        let _ = std::fs::remove_dir_all(&root);
+        let react = serde_json::json!({ "factory": { "backend": "element", "create": "React.createElement" } });
+        assert!(!Factory::from_alx(&react).table);
 
-        assert!(from_aly.table, "{from_aly:?}");
-        assert!(
-            !from_luaux.table,
-            "an alloy.toml with no factory reads luaux.toml"
+        // An old host sends no `[alx]`: the element form, React's.
+        assert_eq!(
+            Factory::from_alx(&serde_json::Value::Null),
+            Factory::default()
         );
     }
 

@@ -292,9 +292,9 @@ element, since that is a CSS class.
 
 ## The table form
 
-Vide and Fusion use the table form of `[alx.factory]`. Silk reads the
-factory where Alloy does: `alloy.toml`, else `.config.aly`, and
-`luaux.toml` when that file sets no factory. Vide types its factory over 19 classes, with no UIPadding, UIStroke,
+Vide and Fusion use the table form of `[alx.factory]`. The host sends
+the factory at init, from `alloy.toml` or `.config.aly` alike. An older
+host sends none, and Silk takes the element form. Vide types its factory over 19 classes, with no UIPadding, UIStroke,
 StyleLink, VideoFrame, or Sound, and types each event's handler by its
 signal. So in the table form, Silk writes each child it adds, and each
 `<video>` and `<audio>`, as the `__silk_child` component, which calls
