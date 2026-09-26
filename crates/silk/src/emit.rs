@@ -1961,6 +1961,51 @@ impl<'a> Writer<'a> {
         m.opacity = style.opacity;
         props::finish_colors(&mut m, target, false);
 
+        // A Luau value in `style` goes to the one property behind it, so a
+        // source stays live: `style={{ scale = grow }}`.
+        let mut live: HashSet<&'static str> = HashSet::new();
+        let dynamic = match e.attr("style").map(|a| a.value) {
+            Some(Value::Expr(s, t)) => css::dynamic_table(&src[s..t]),
+
+            _ => Vec::new(),
+        };
+
+        for (name, value) in dynamic {
+            match name.as_str() {
+                "scale" => {
+                    m.modifier("UIScale", "Scale", value);
+                    live.insert("UIScale");
+                }
+
+                "border-color" | "border-width" => {
+                    let key = match name.as_str() {
+                        "border-color" => "Color",
+
+                        _ => "Thickness",
+                    };
+                    m.modifier("UIStroke", key, value);
+                    m.modifier("UIStroke", "ApplyStrokeMode", "Enum.ApplyStrokeMode.Border");
+                    live.insert("UIStroke");
+                }
+
+                "background-color" => {
+                    m.set("BackgroundColor3", value);
+
+                    if m.get("BackgroundTransparency") == Some("1") {
+                        m.set("BackgroundTransparency", "0");
+                    }
+                }
+
+                "color" if target == Target::Image => m.set("ImageColor3", value),
+
+                "color" => m.set("TextColor3", value),
+
+                "rotate" => m.set("Rotation", value),
+
+                _ => m.set("ZIndex", value),
+            }
+        }
+
         if let Some(base) = base_size {
             let w = style.width.unwrap_or(base.0);
             let h = style.height.unwrap_or(base.1);
@@ -2390,8 +2435,18 @@ impl<'a> Writer<'a> {
                 continue;
             }
 
-            let p: String = props.iter().map(|(k, v)| format!(" {k}={{{v}}}")).collect();
+            let mut p: String = props.iter().map(|(k, v)| format!(" {k}={{{v}}}")).collect();
             let tag = self.child_tag(c);
+
+            // The child component builds a child with a live value through
+            // the project's factory, which binds a source.
+            if let Some(create) = &self.opts.factory.create
+                && live.contains(c)
+                && self.opts.factory.table
+            {
+                p.push_str(&format!(" Make={{{create}}}"));
+            }
+
             children.push_str(&format!("<{tag}{p} />"));
         }
 
@@ -3489,9 +3544,14 @@ return v end "
 /// The child component as one line of Alloy, for the table form: it
 /// makes a child with `Instance.new`, so no typed factory call names its
 /// class. It connects a handler to a signal, as a VideoFrame takes one.
+/// With `Make`, the project's factory builds the child, so a source in a
+/// value stays live under Vide, Fluid, and Fusion alike.
 pub fn child_text(helper: &str) -> String {
     format!(
-        "local function {helper}_child(props: any): Instance local c: any = Instance.new(props.Class) \
+        "local function {helper}_child(props: any): Instance \
+if props.Make ~= nil then local make: any = props.Make local rest: any = {{}} \
+for k, v in props do if k ~= \"Class\" and k ~= \"Make\" then rest[k] = v end end return make(props.Class)(rest) end \
+local c: any = Instance.new(props.Class) \
 for k, v in props do if k == \"Class\" then continue end \
 if typeof(c[k]) == \"RBXScriptSignal\" then c[k]:Connect(v) else c[k] = v end end return c end "
     )
@@ -4552,6 +4612,32 @@ mod tests {
         );
     }
 
+    /// The child component hands a child with `Make` to the factory,
+    /// without the `Class` and the `Make`.
+    #[test]
+    fn the_child_component_builds_through_make() {
+        let script = format!(
+            "{}\nlocal made: any = nil\nlocal function make(class) return function(props) made = {{ class = class, props = props }} return 7 end end\nassert(__silk_child({{ Class = \"UIScale\", Scale = 2, Make = make }}) == 7)\nassert(made.class == \"UIScale\" and made.props.Scale == 2 and made.props.Make == nil and made.props.Class == nil)\n",
+            child_text("__silk")
+        );
+        let path = std::env::temp_dir().join(format!("silk-child-{}.luau", std::process::id()));
+        std::fs::write(&path, script).unwrap();
+        let run = std::process::Command::new("luau").arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        let Ok(out) = run else {
+            eprintln!("no luau on PATH: the helper run is skipped");
+
+            return;
+        };
+
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     #[test]
     fn a_head_tag_outside_a_document_reports() {
         let out = run(
@@ -4660,6 +4746,60 @@ mod tests {
         assert!(
             silk("return <ul style={{ appearance = \"none\" }}><li>a</li></ul>\n")
                 .contains("UIPadding")
+        );
+    }
+
+    /// A Luau value in `style` reaches the one property behind it, so a
+    /// source stays live. The table form builds a live child through the
+    /// project's factory.
+    #[test]
+    fn a_luau_value_in_style_reaches_its_property() {
+        let src = "return <button style={{ scale = grow, borderColor = color, borderWidth = 2, zIndex = z, backgroundColor = bg, rotate = spin }}>Go</button>\n";
+        let out = run(src, "a.alx", &Options::default());
+        let text = apply(src, &out.edits);
+
+        assert!(text.contains("<UIScale Scale={grow} />"), "{text}");
+        assert!(
+            text.contains("<UIStroke Color={color} Thickness={2} ApplyStrokeMode={Enum.ApplyStrokeMode.Border} />"),
+            "{text}"
+        );
+        assert!(
+            text.contains("ZIndex={z}")
+                && text.contains("BackgroundColor3={bg}")
+                && text.contains("Rotation={spin}"),
+            "{text}"
+        );
+        assert!(out.findings.is_empty(), "{:?}", out.findings);
+
+        for create in ["vide.create", "New"] {
+            let opts = Options {
+                factory: Factory {
+                    table: true,
+                    create: Some(create.into()),
+                    compute: None,
+                },
+                ..Options::default()
+            };
+            let text = apply(src, &run(src, "a.alx", &opts).edits);
+
+            assert!(
+                text.contains(&format!(
+                    "<__silk_child Class=\"UIScale\" Scale={{grow}} Make={{{create}}} />"
+                )),
+                "{text}"
+            );
+            // A child with no live value keeps `Instance.new`.
+            assert!(
+                text.contains("<__silk_child Class=\"UIPadding\" PaddingTop={UDim.new(0, 1)} PaddingRight={UDim.new(0, 6)} PaddingBottom={UDim.new(0, 1)} PaddingLeft={UDim.new(0, 6)} />"),
+                "{text}"
+            );
+        }
+
+        // A property with no single Roblox property behind it stays a
+        // compile-time value.
+        assert!(
+            lints("return <div style={{ width = w }}></div>\n")
+                .contains(&"dynamic_style".to_string())
         );
     }
 

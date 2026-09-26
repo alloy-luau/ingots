@@ -444,6 +444,10 @@ pub fn parse_table(text: &str, base: usize) -> (Vec<Decl>, Vec<Problem>) {
                 important: false,
             }),
 
+            // A property with one Roblox property behind it takes a Luau
+            // value; the emitter reads it through `dynamic_table`.
+            None if DYNAMIC.contains(&name.as_str()) => {}
+
             None => problems.push(dynamic(
                 (inner_base + value_at, inner_base + value_at + value.len()),
                 &format!("`{key}`"),
@@ -452,6 +456,52 @@ pub fn parse_table(text: &str, base: usize) -> (Vec<Decl>, Vec<Problem>) {
     }
 
     (decls, problems)
+}
+
+/// The CSS properties a `style` table takes as a Luau value: each has one
+/// Roblox property behind it, which takes the value as it is.
+pub const DYNAMIC: &[&str] = &[
+    "background-color",
+    "border-color",
+    "border-width",
+    "color",
+    "rotate",
+    "scale",
+    "z-index",
+];
+
+/// The fields of a `style` table whose value is Luau and not a literal,
+/// for the properties of [`DYNAMIC`]: the CSS name and the expression.
+pub fn dynamic_table(text: &str) -> Vec<(String, String)> {
+    let Some(inner) = text
+        .trim()
+        .strip_prefix('{')
+        .and_then(|r| r.strip_suffix('}'))
+    else {
+        return Vec::new();
+    };
+
+    fields(inner)
+        .into_iter()
+        .filter_map(|(s, e)| {
+            let field = &inner[s..e];
+            let eq = top_eq(field)?;
+            let key = field[..eq]
+                .trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'');
+            let name = kebab(key);
+            let value = field[eq + 1..].trim();
+            let quoted = value.len() >= 2
+                && (value.starts_with('"') && value.ends_with('"')
+                    || value.starts_with('\'') && value.ends_with('\''));
+            let literal = quoted || value.parse::<f64>().is_ok();
+
+            (DYNAMIC.contains(&name.as_str()) && !literal).then(|| (name, value.to_string()))
+        })
+        .collect()
 }
 
 /// The spans of the fields of a table's inside, split on top-level `,`

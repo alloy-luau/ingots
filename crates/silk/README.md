@@ -48,6 +48,12 @@ Silk follows React where React and HTML differ:
   pixels, except for the unitless properties React knows (`opacity`,
   `zIndex`, `flexGrow`, `fontWeight`, `lineHeight`, and the rest). A
   `style` string is a `react_style` error.
+- A value in `style` can be Luau, as in React, for a property with one
+  Roblox property behind it: `backgroundColor`, `color`,
+  `borderColor`, `borderWidth`, `rotate`, `scale`, and `zIndex`. The
+  value is what the Roblox property takes, a `Color3` or a number, and
+  a source stays live: `style={{ scale = grow }}` sets the `Scale` of
+  a UIScale. Another property takes a literal alone.
 - Text takes HTML character references: `&copy;`, `&nbsp;`, `&mdash;`,
   `&#169;`.
 
@@ -292,7 +298,9 @@ factory where Alloy does: `alloy.toml`, else `.config.aly`, and
 StyleLink, VideoFrame, or Sound, and types each event's handler by its
 signal. So in the table form, Silk writes each child it adds, and each
 `<video>` and `<audio>`, as the `__silk_child` component, which calls
-`Instance.new`. It passes each handler through `__silk_on`, so a
+`Instance.new`. A child with a Luau value from `style` also takes
+`Make`, the `create` of the factory, so the library binds a source in
+it. It passes each handler through `__silk_on`, so a
 `() -> ()` fits `Activated`. The element form, for React, keeps the
 Roblox tags and the handlers as written.
 
