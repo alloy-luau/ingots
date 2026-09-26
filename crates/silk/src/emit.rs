@@ -176,6 +176,10 @@ struct Writer<'a> {
     uses_helper: bool,
     uses_sheet: bool,
     style_count: usize,
+    /// The spans of the elements Silk wraps in a `{ }` hole.
+    in_holes: Vec<(usize, usize)>,
+    /// Elements that Silk gives modifier or layout children.
+    with_children: HashSet<usize>,
 }
 
 /// Ranks for insertions at one offset: an outer opening comes first, an
@@ -241,6 +245,8 @@ impl<'a> Writer<'a> {
             uses_helper: false,
             uses_sheet: false,
             style_count: 0,
+            in_holes: Vec::new(),
+            with_children: HashSet::new(),
         };
         w.find_foldable();
 
@@ -300,6 +306,7 @@ impl<'a> Writer<'a> {
     }
 
     fn finish(mut self) -> Output {
+        self.guard_text();
         let mut lead = String::new();
 
         if self.uses_helper {
@@ -364,6 +371,154 @@ impl<'a> Writer<'a> {
             edits: out,
             findings: self.findings,
         }
+    }
+
+    // -------------------------------------------------------------- holes
+
+    /// Keeps the text in Silk's holes readable (LANG_BUGS 68). The markup
+    /// compiler finds the end of a `{ }` hole as it reads Luau, so in
+    /// markup text there a quote with no pair on its line, a backtick, a
+    /// brace, `--`, or `[[` opens a string, a hole, or a comment, and the
+    /// file does not parse. A run of such text becomes Luau strings in
+    /// holes, which the compiler reads as the same text.
+    fn guard_text(&mut self) {
+        for i in 0..self.m.elements.len() {
+            let e = self.el(i);
+
+            if self.foldable[i]
+                || !self
+                    .in_holes
+                    .iter()
+                    .any(|(s, t)| *s <= e.start && e.end <= *t)
+            {
+                continue;
+            }
+
+            // A component takes the run as one child, and a text class
+            // with nothing else inside takes it as its `Text`. Beside a
+            // child element, a lone hole would read as a child, so the
+            // run keeps its plain characters as text.
+            let component = self.tag(i).is_none() && !roblox::is_class(&e.name);
+            let alone = !self.with_children.contains(&i)
+                && e.children.iter().all(|c| match c {
+                    Child::Element(k) => self.foldable[*k],
+
+                    Child::Text(..) => true,
+
+                    _ => false,
+                });
+            let mut run: Option<(usize, usize)> = None;
+            let mut runs = Vec::new();
+            let mut comments = Vec::new();
+
+            for c in &e.children {
+                let span = match c {
+                    Child::Text(s, t) => Some((*s, *t)),
+
+                    Child::Element(k) if self.foldable[*k] => {
+                        Some((self.el(*k).start, self.el(*k).end))
+                    }
+
+                    Child::Comment(s, t) => {
+                        comments.push((*s, *t));
+                        None
+                    }
+
+                    _ => None,
+                };
+
+                match span {
+                    Some((s, t)) => run = Some(run.map_or((s, t), |(a, _)| (a, t))),
+
+                    None => runs.extend(run.take()),
+                }
+            }
+
+            runs.extend(run);
+
+            for (s, t) in runs {
+                self.guard_run(s, t, component || alone);
+            }
+
+            for (s, t) in comments {
+                self.guard_comment(s, t);
+            }
+        }
+    }
+
+    /// Whether an edit reaches past `s..t`: it writes the span already.
+    fn edited_past(&self, s: usize, t: usize) -> bool {
+        self.reps
+            .iter()
+            .any(|(a, b, _)| *a < t && *b > s && (*a < s || *b > t))
+    }
+
+    /// Writes one run of markup text as the markup compiler reads it:
+    /// the text with Silk's edits, its escapes decoded, and its lines
+    /// joined. `whole` writes it as one string, else each risky
+    /// character alone.
+    fn guard_run(&mut self, s: usize, t: usize, whole: bool) {
+        if self.edited_past(s, t) {
+            return;
+        }
+
+        let mut edits: Vec<(usize, usize, i64, usize, &str)> = self
+            .reps
+            .iter()
+            .filter(|(a, b, _)| *a >= s && *b <= t)
+            .map(|(a, b, x)| (*a, *b, 0, 0, x.as_str()))
+            .chain(
+                self.ins
+                    .iter()
+                    .filter(|(at, ..)| s < *at && *at < t)
+                    .map(|(at, r, q, x)| (*at, *at, *r, *q, x.as_str())),
+            )
+            .collect();
+        edits.sort_by_key(|(a, b, r, q, _)| (*a, *b != *a, *r, *q));
+        let mut text = String::new();
+        let mut cursor = s;
+
+        for (a, b, _, _, x) in edits {
+            text.push_str(&self.src[cursor..a]);
+            text.push_str(x);
+            cursor = b;
+        }
+
+        text.push_str(&self.src[cursor..t]);
+
+        if luau_safe(&text) {
+            return;
+        }
+
+        let words = normalise(&decode_markup(&text));
+        let out = guarded(&words, whole, self.src[s..t].matches('\n').count());
+        self.reps.retain(|(a, b, _)| !(*a >= s && *b <= t));
+        self.ins.retain(|(at, ..)| !(s < *at && *at < t));
+        self.reps.push((s, t, out));
+    }
+
+    /// A `<!-- -->` comment whose text a Luau reader misreads becomes a
+    /// long Luau comment in a hole, which the compiler drops the same way.
+    fn guard_comment(&mut self, s: usize, t: usize) {
+        let Some(inner) = self.src[s..t]
+            .strip_prefix("<!--")
+            .and_then(|x| x.strip_suffix("-->"))
+        else {
+            return;
+        };
+
+        if luau_safe(inner) || self.edited_past(s, t) {
+            return;
+        }
+
+        let mut level = 0;
+
+        while inner.contains(&format!("]{}]", "=".repeat(level))) {
+            level += 1;
+        }
+
+        let eq = "=".repeat(level);
+        self.reps.push((s, t, format!("{{--[{eq}[{inner}]{eq}]}}")));
     }
 
     // ---------------------------------------------------------- structure
@@ -2648,7 +2803,10 @@ impl<'a> Writer<'a> {
                 self.replace(s, t, text);
             }
 
-            None if !children.is_empty() => self.insert(e.open_end, RANK_CHILDREN, children),
+            None if !children.is_empty() => {
+                self.insert(e.open_end, RANK_CHILDREN, children);
+                self.with_children.insert(i);
+            }
 
             None => {}
         }
@@ -2762,8 +2920,9 @@ impl<'a> Writer<'a> {
     /// The text around the helper call that stands for element `i`. Among
     /// children it is a `{ }` hole. In a class with a `Text` property the
     /// markup compiler reads a hole as text, so a fragment holds it there
-    /// and it stays a child.
-    fn hole_braces(&self, i: usize) -> (&'static str, &'static str) {
+    /// and it stays a child. The markup of the element then stands in the
+    /// hole, and [`Writer::guard_text`] keeps its text readable there.
+    fn hole_braces(&mut self, i: usize) -> (&'static str, &'static str) {
         let e = self.el(i);
         let in_text = e.parent.is_some_and(|p| {
             self.text_boxes.contains(&p)
@@ -2772,6 +2931,10 @@ impl<'a> Writer<'a> {
                     "TextLabel" | "TextButton" | "TextBox"
                 )
         });
+
+        if e.in_children {
+            self.in_holes.push((e.start, e.end));
+        }
 
         match (e.in_children, in_text) {
             (true, true) => ("<>{", "}</>"),
@@ -3634,6 +3797,150 @@ fn luau_string(text: &str) -> String {
     let body = body.strip_suffix("\\n").unwrap_or(body);
 
     format!("\"{body}\"")
+}
+
+/// Whether a Luau reader reads markup text as it stands: every quote
+/// closes on its line, and no backtick, brace, `--`, or `[[` or `[=`
+/// opens a string, a hole, or a comment. The markup compiler reads a
+/// `{ }` hole that way to find its end.
+fn luau_safe(text: &str) -> bool {
+    let b = text.as_bytes();
+    let mut i = 0;
+
+    while i < b.len() {
+        match b[i] {
+            b'{' | b'}' | b'`' => return false,
+
+            b'-' if b.get(i + 1) == Some(&b'-') => return false,
+
+            b'[' if matches!(b.get(i + 1), Some(b'[' | b'=')) => return false,
+
+            q @ (b'"' | b'\'') => {
+                i += 1;
+
+                loop {
+                    match b.get(i) {
+                        Some(b'\\') => i += 2,
+
+                        Some(c) if *c == q => break,
+
+                        None | Some(b'\n') => return false,
+
+                        Some(_) => i += 1,
+                    }
+                }
+            }
+
+            _ => {}
+        }
+
+        i += 1;
+    }
+
+    true
+}
+
+/// Markup text with its escapes decoded, as the markup compiler decodes
+/// them: `\{`, `\}`, `` \` ``, `\\`, and `\<` give the character, and a
+/// backslash before any other keeps it.
+fn decode_markup(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match (c, chars.peek()) {
+            ('\\', Some(&n @ ('{' | '}' | '`' | '\\' | '<'))) => {
+                out.push(n);
+                chars.next();
+            }
+
+            (c, _) => out.push(c),
+        }
+    }
+
+    out
+}
+
+/// Markup text with its lines joined, as the markup compiler joins them:
+/// text on one line stays as it is; on more lines, each line loses the
+/// space at its ends, the empty lines go, and one space joins the rest.
+fn normalise(raw: &str) -> String {
+    if !raw.contains('\n') {
+        return raw.to_string();
+    }
+
+    let lines: Vec<&str> = raw.split('\n').collect();
+    let last = lines.len() - 1;
+
+    lines
+        .iter()
+        .enumerate()
+        .map(|(n, line)| {
+            let line = if n > 0 { line.trim_start() } else { line };
+
+            if n < last { line.trim_end() } else { line }
+        })
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Joined text as markup that a Luau reader reads as it stands. `whole`
+/// writes one string in a hole. Else each risky character goes in a hole
+/// of its own, and the rest stays text, so a text class beside a child
+/// element still has text. The `lines` of the span go inside the last
+/// hole, where they change no space of the text.
+fn guarded(words: &str, whole: bool, lines: usize) -> String {
+    let pad = "\n".repeat(lines);
+
+    if whole {
+        return format!("{{{}{pad}}}", luau_string(words));
+    }
+
+    let mut out = String::new();
+    let mut hole = String::new();
+    let mut prev: Option<char> = None;
+    let flush = |out: &mut String, hole: &mut String| {
+        if !hole.is_empty() {
+            out.push_str(&format!("{{{}}}", luau_string(hole)));
+            hole.clear();
+        }
+    };
+
+    for c in words.chars() {
+        let risky = matches!(c, '\'' | '"' | '`' | '{' | '}')
+            || (c == '-' && prev == Some('-'))
+            || (matches!(c, '[' | '=') && prev == Some('['));
+
+        if risky {
+            hole.push(c);
+            prev = None;
+
+            continue;
+        }
+
+        flush(&mut out, &mut hole);
+
+        match c {
+            '\\' => out.push_str("\\\\"),
+
+            '<' => out.push_str("\\<"),
+
+            c => out.push(c),
+        }
+
+        prev = Some(c);
+    }
+
+    flush(&mut out, &mut hole);
+
+    match out.rfind('}') {
+        Some(at) => out.insert_str(at, &pad),
+
+        None => out.push_str(&pad),
+    }
+
+    out
 }
 
 /// `text` with the newlines `original` had, so the file keeps its lines.
@@ -4943,6 +5250,51 @@ assert(__silk_not(false) == true)
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    /// LANG_BUGS 68: the markup compiler finds the end of a hole as it
+    /// reads Luau. Text in a hole that Silk writes, with a quote that has
+    /// no pair on its line, becomes Luau strings the compiler reads as
+    /// the same text, and the file keeps its lines.
+    #[test]
+    fn text_in_a_hole_of_silk_reads_as_the_same_text() {
+        // A text class with nothing else takes one string.
+        let src = "return <div>\n  <p className=\"text-sm\">\n    Uses \"Cave Tileset\" and \"Weapons\n    Pack\" by xvideosman.\n  </p>\n</div>\n";
+        let out = vide(src);
+        assert!(
+            out.contains(
+                "LayoutOrder={1}>{\"Uses \\\"Cave Tileset\\\" and \\\"Weapons Pack\\\" by xvideosman.\"\n\n\n}</TextLabel>"
+            ),
+            "{out}"
+        );
+
+        // Beside the children of a button, the text stays text.
+        let out = vide("return <div><button className=\"x\">Don't -- {\"}\"}</button></div>\n");
+        assert!(out.contains(">Don{\"'\"}t -{\"-\"} "), "{out}");
+
+        // RichText, an entity, and a pair on one line.
+        let out = vide(
+            "return <div><p className=\"x\">Hi <b>it's</b> &#123; \"ok\"</p><p className=\"y\">A \"b\" c</p></div>\n",
+        );
+        assert!(out.contains("{\"Hi <b>it's</b> { \\\"ok\\\"\"}"), "{out}");
+        assert!(out.contains(">A \"b\" c</TextLabel>"), "{out}");
+
+        // A comment, and the text of a component the order helper wraps.
+        let src = "return <div>\n  <h1>T</h1>\n  <Card>Don't</Card>\n  <!-- don't -->\n</div>\n";
+
+        for out in [vide(src), silk(src)] {
+            assert!(out.contains("<Card>{\"Don't\"}</Card>"), "{out}");
+        }
+
+        let out = vide("return <div><div className=\"x\"><!-- it's ]] --></div></div>\n");
+        assert!(out.contains("{--[=[ it's ]] ]=]}"), "{out}");
+
+        // React writes no hole around a classed element: the text stays.
+        let out = silk(
+            src.replace("<h1>T</h1>", "<p className=\"x\">it's</p>")
+                .as_str(),
+        );
+        assert!(out.contains(">it's</TextLabel>"), "{out}");
     }
 
     /// LANG_BUGS 67: a hole beside an element of its own in a button is
