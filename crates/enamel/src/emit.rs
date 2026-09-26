@@ -41,11 +41,21 @@ impl Plan<'_> {
         !self.resolved.children.is_empty()
     }
 
+    /// Whether the classes set an axis of a `Size` the tag also writes.
+    /// The two merge in that attribute: an axis no class names keeps the
+    /// element's own size.
+    pub fn merges_size(&self) -> bool {
+        let (x, y) = self.resolved.size;
+
+        self.found.size_attr.is_some() && (x.is_some() || y.is_some())
+    }
+
     /// The attribute text that replaces `ClassName="..."`.
     fn attributes(&self) -> String {
         self.resolved
             .props
             .iter()
+            .filter(|(k, _)| k != "Size" || !self.merges_size())
             .map(|(k, v)| format!("{k}={{{v}}}"))
             .collect::<Vec<_>>()
             .join(" ")
@@ -108,6 +118,18 @@ impl Plan<'_> {
 
         let attrs = self.attributes();
         edits.push(Edit::replace(f.attr.0 as u32, f.attr.1 as u32, attrs));
+
+        if let Some((s, e)) = f.size_attr
+            && self.merges_size()
+        {
+            let axis = |d: Option<classes::Dim>| d.map_or("nil".to_string(), |d| d.luau());
+            let (x, y) = self.resolved.size;
+            edits.push(Edit::insert(s as u32, format!("{helper}_size(")));
+            edits.push(Edit::insert(
+                e as u32,
+                format!(", {}, {})", axis(x), axis(y)),
+            ));
+        }
 
         let child = format!("{helper}_child");
         let children = self.children(table.then_some(child.as_str()));
@@ -186,6 +208,14 @@ return el end "
 pub fn child_text(helper: &str) -> String {
     format!(
         "local function {helper}_child(props: any): Instance local c: any = Instance.new(props.Class) for k, v in props do if k ~= \"Class\" then c[k] = v end end return c end "
+    )
+}
+
+/// The merge of a `Size` attribute with the axes the classes name. A
+/// source, a function under Vide or a React binding, stays a source.
+pub fn size_text(helper: &str) -> String {
+    format!(
+        "local function {helper}_size(size: any, x: UDim?, y: UDim?): any local function merge(s: UDim2): UDim2 return UDim2.new(x or s.X, y or s.Y) end local kind = type(size) if kind == \"function\" then local read: () -> UDim2 = size return function() return merge(read()) end end if kind == \"table\" and size.map ~= nil then local map: (any, (UDim2) -> UDim2) -> any = size.map return map(size, merge) end return merge(size) end "
     )
 }
 
@@ -336,14 +366,35 @@ mod tests {
         assert!(!table_form("[build]\nin = \"src\"\n"));
     }
 
+    /// A `Size` attribute keeps the axis no class names; the class sets
+    /// the other one inside it.
+    #[test]
+    fn a_size_attribute_keeps_the_axis_no_class_names() {
+        let src = "return <Frame ClassName=\"h-10 bg-red-500\" Size={UDim2.new(1, 0, 0, 0)} />\n";
+        let found = markup::find(src);
+        let plan = plan(&found[0], &Context::default());
+
+        assert!(plan.merges_size());
+        assert_eq!(
+            apply(src, &plan.edits("__enamel", false)),
+            "return <Frame BackgroundColor3={Color3.fromRGB(239, 68, 68)} Size={__enamel_size(UDim2.new(1, 0, 0, 0), nil, UDim.new(0, 40))} />\n"
+        );
+
+        // With no attribute, the classes write the whole Size.
+        let src = "return <Frame ClassName=\"h-10\" />\n";
+        let found = markup::find(src);
+        assert!(!super::plan(&found[0], &Context::default()).merges_size());
+    }
+
     /// The helper runs under `luau` against the mock element of
     /// `tests/helper.luau`. A machine without `luau` skips the run.
     #[test]
     fn the_helper_runs_against_a_mock_element() {
         let script = format!(
-            "{}\n{}\n{}",
+            "{}\n{}\n{}\n{}",
             helper_text("__enamel"),
             child_text("__enamel"),
+            size_text("__enamel"),
             include_str!("../tests/helper.luau")
         );
         let path = std::env::temp_dir().join(format!("enamel-helper-{}.luau", std::process::id()));

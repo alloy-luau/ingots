@@ -44,6 +44,12 @@ call for a `UIPadding` or a `UIStroke` fails the type check.
 | `transition`, `transition-colors`, `duration-300`, `duration-[0.3s]`, `ease-out`, `ease-back-in`, `delay-100` | a TweenService tween on each state change |
 | `w-[200px]`, `bg-[#ff0000]`, `text-[14px]` | arbitrary values |
 
+`w-auto` and `h-auto` set `AutomaticSize` on their axis and start that
+axis at 0, so the content sets it. An axis that no class names keeps the
+element's own size. With a `Size` attribute on the tag, the classes set
+their axes inside it, and a source stays a source. With no attribute,
+the axis keeps the Roblox default of 100 pixels.
+
 A `transition` makes each state change a tween: 150ms, Quad in-out,
 over the colors, the transparencies, position, size, rotation, scale,
 and stroke width.

@@ -1,5 +1,5 @@
--- The state helper and the child component against a mock of the
--- Roblox pieces they touch. The test in emit.rs puts both above this
+-- The state helper, the child component, and the size merge against a
+-- mock of the Roblox pieces they touch. The test in emit.rs puts them above this
 -- file and runs it under `luau`. An error fails the test.
 
 -- In deferred mode a signal fires at flush(), as Roblox's default does.
@@ -238,6 +238,28 @@ local padding = __enamel_child({ Class = "UIPadding", PaddingTop = 4 })
 check("child class", if padding.ClassName == "UIPadding" then 1 else 0, 1)
 check("child property", padding.PaddingTop, 4)
 check("child keeps no Class", if padding.Class == nil then 1 else 0, 1)
+
+-- A Size attribute keeps the axis no class names: a value, a source,
+-- or a binding.
+UDim2 = {
+	new = function(x, y)
+		return { X = x, Y = y }
+	end,
+}
+local merged = __enamel_size(UDim2.new(1, 2), nil, 40)
+check("size keeps x", merged.X, 1)
+check("size takes y", merged.Y, 40)
+local source = __enamel_size(function()
+	return UDim2.new(3, 4)
+end, 50, nil)
+check("source takes x", source().X, 50)
+check("source keeps y", source().Y, 4)
+local binding = {
+	map = function(_, f)
+		return f(UDim2.new(5, 6))
+	end,
+}
+check("binding keeps x", __enamel_size(binding, nil, 60).X, 5)
 
 if #failures > 0 then
 	error(table.concat(failures, "\n"))

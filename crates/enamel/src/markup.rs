@@ -25,6 +25,8 @@ pub struct Found {
     /// Whether the tag is an HTML element that Silk writes, with the
     /// classes in `className` or `class`.
     pub html: bool,
+    /// The expression of a `Size={...}` attribute on the open tag.
+    pub size_attr: Option<(usize, usize)>,
 }
 
 fn is_name_byte(b: u8) -> bool {
@@ -123,6 +125,7 @@ fn find_named(source: &str, attr_name: &str) -> Vec<Found> {
         }
 
         let html = tag.starts_with(|c: char| c.is_ascii_lowercase());
+        let size_attr = hole_attr(source, name_end, open_end, "Size");
         out.push(Found {
             tag,
             start,
@@ -133,6 +136,7 @@ fn find_named(source: &str, attr_name: &str) -> Vec<Found> {
             classes,
             in_children: in_children(source, start),
             html,
+            size_attr,
         });
         from = attr.1;
     }
@@ -229,6 +233,44 @@ fn open_tag_end(source: &str, from: usize) -> Option<(usize, Option<(usize, usiz
                 let self_close = (i > 0 && bytes[i - 1] == b'/').then(|| (i - 1, i + 1));
 
                 return Some((i + 1, self_close));
+            }
+            _ => {}
+        }
+
+        i += 1;
+    }
+
+    None
+}
+
+/// The span of the expression in a `name={...}` attribute of the open
+/// tag between `from` and `to`, inside the braces.
+fn hole_attr(source: &str, from: usize, to: usize, name: &str) -> Option<(usize, usize)> {
+    let bytes = source.as_bytes();
+    let key = format!("{name}=");
+    let mut i = from;
+
+    while i < to {
+        match bytes[i] {
+            b'{' => {
+                let end = skip_hole(source, i);
+                let at = i.checked_sub(key.len())?;
+
+                if source[at..i] == key && at > 0 && bytes[at - 1].is_ascii_whitespace() {
+                    return Some((i + 1, end - 1));
+                }
+
+                i = end;
+
+                continue;
+            }
+            b'"' | b'\'' => {
+                let q = bytes[i];
+                i += 1;
+
+                while i < to && bytes[i] != q {
+                    i += 1;
+                }
             }
             _ => {}
         }

@@ -220,6 +220,10 @@ impl Handler for Enamel {
             lead.push_str(&emit::child_text(&self.helper));
         }
 
+        if plans.iter().any(emit::Plan::merges_size) {
+            lead.push_str(&emit::size_text(&self.helper));
+        }
+
         if !lead.is_empty() {
             edits.push(Edit::insert(emit::helper_at(&file.source), lead));
         }

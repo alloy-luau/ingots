@@ -2100,6 +2100,8 @@ pub struct Resolved {
     /// Whether a value of the theme file is in use, so the file needs
     /// the theme's prelude.
     pub uses_theme: bool,
+    /// The axes of `Size` the classes name, an automatic one at 0.
+    pub size: (Option<Dim>, Option<Dim>),
     /// Problems by class index.
     pub problems: Vec<(usize, Problem)>,
 }
@@ -2327,10 +2329,18 @@ pub fn resolve(element: Element, classes: &[Class], ctx: &Context) -> Resolved {
 
     let gui = element.is_gui_object();
 
-    // Size, with the Roblox default on an axis no class named.
-    if gui && (size.0.is_some() || size.1.is_some()) {
-        let x = size.0.unwrap_or(Dim::px(100.0));
-        let y = size.1.unwrap_or(Dim::px(100.0));
+    // Size. An automatic axis grows from 0, so the content sets it. An
+    // axis no class names keeps the size of a new element, the Roblox
+    // 100 pixels; the transform takes it from a `Size` attribute.
+    let axes = (
+        size.0.or(auto.0.then_some(Dim::px(0.0))),
+        size.1.or(auto.1.then_some(Dim::px(0.0))),
+    );
+
+    if gui && (axes.0.is_some() || axes.1.is_some()) {
+        out.size = axes;
+        let x = axes.0.unwrap_or(Dim::px(100.0));
+        let y = axes.1.unwrap_or(Dim::px(100.0));
         out.props.push((
             "Size".into(),
             format!(
@@ -3700,6 +3710,39 @@ mod tests {
             t.props
                 .iter()
                 .any(|(k, v)| k == "FontFace" && v.contains("Montserrat.json"))
+        );
+    }
+
+    /// An automatic axis grows from 0, so the content sets it, as
+    /// Tailwind's `auto` does. An axis no class names stays at the size
+    /// of a new element.
+    #[test]
+    fn an_automatic_axis_starts_at_zero() {
+        let size = |classes: &str| {
+            let r = resolved("Frame", classes);
+            let get = |k: &str| r.props.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+
+            (get("Size"), get("AutomaticSize"))
+        };
+
+        assert_eq!(
+            size("w-auto h-10"),
+            (
+                Some("UDim2.new(0, 0, 0, 40)".into()),
+                Some("Enum.AutomaticSize.X".into())
+            )
+        );
+        assert_eq!(
+            size("h-auto"),
+            (
+                Some("UDim2.new(0, 100, 0, 0)".into()),
+                Some("Enum.AutomaticSize.Y".into())
+            )
+        );
+        assert_eq!(size("h-10").0, Some("UDim2.new(0, 100, 0, 40)".into()));
+        assert_eq!(
+            size("w-40 w-auto").0,
+            Some("UDim2.new(0, 160, 0, 100)".into())
         );
     }
 
