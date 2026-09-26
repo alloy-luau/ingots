@@ -163,7 +163,10 @@ utilities. Silk leaves out each default that a utility sets, and only
 that one: `text-white` replaces the text color and keeps the size of an
 `h1`, and `bg-gradient-to-b` adds a UIGradient and keeps the clear
 background. A class with a state variant, `hover:bg-red-500`, keeps the
-default for the resting look. Every class also
+default for the resting look. A `w-` or `h-` class replaces the size on
+its axis. Silk then passes its own size on the other axis to Enamel as
+a class, so `<div className="w-full">` keeps its automatic height as
+`w-full h-0 h-auto`. Every class also
 becomes a tag, so `.card` in a `<style>` still matches. In the editor,
 Enamel completes and explains its utilities in `className`, and does not
 report a class it does not know on an HTML element, since that is a CSS

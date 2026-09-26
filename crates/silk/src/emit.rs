@@ -928,6 +928,15 @@ impl<'a> Writer<'a> {
             .flat_map(str::split_whitespace)
             .collect();
         let enamel = self.opts.enamel && !class_tokens.is_empty();
+        // The end of the class list, where Silk adds a class for Enamel.
+        let class_end = ["className", "class"]
+            .iter()
+            .find_map(|n| match e.attr(n)?.value {
+                Value::Str(_, t) => Some(t),
+
+                _ => None,
+            })
+            .filter(|_| enamel);
         let mut replaced = match enamel {
             true => crate::enamel::sets(class_tokens.iter().copied()),
 
@@ -1370,16 +1379,51 @@ impl<'a> Writer<'a> {
         if let Some(base) = base_size {
             let w = style.width.unwrap_or(base.0);
             let h = style.height.unwrap_or(base.1);
-            let (size, auto) = props::size_props(w, h);
-            m.set("Size", size);
-            m.set("AutomaticSize", auto);
+            let named = |size: &str, auto: &str| (replaced.contains(size), replaced.contains(auto));
+            let x = named(crate::enamel::SIZE_X, crate::enamel::AUTO_X);
+            let y = named(crate::enamel::SIZE_Y, crate::enamel::AUTO_Y);
+
+            if x.0 || x.1 || y.0 || y.1 {
+                // Enamel writes `Size` and `AutomaticSize`, with the Roblox
+                // 100 px on an axis no class names. Silk names its own
+                // axis as a class, so the two write one size.
+                let mut more = String::new();
+
+                for (axis, (sized, auto), value) in [("w", x, w), ("h", y, h)] {
+                    match (sized, auto, value) {
+                        (true, ..) => {}
+
+                        (false, true, _) => more.push_str(&format!(" {axis}-0")),
+
+                        (false, false, Axis::Auto) => {
+                            more.push_str(&format!(" {axis}-0 {axis}-auto"))
+                        }
+
+                        (false, false, Axis::Len(l)) => {
+                            if let Some(c) = len_class(l) {
+                                more.push_str(&format!(" {axis}-{c}"));
+                            }
+                        }
+                    }
+                }
+
+                if let Some(t) = class_end
+                    && !more.is_empty()
+                {
+                    self.insert(t, RANK_TEXT, more);
+                }
+            } else {
+                let (size, auto) = props::size_props(w, h);
+                m.set("Size", size);
+                m.set("AutomaticSize", auto);
+            }
 
             // A rule of the file may give the height.
             let ruled = static_decls
                 .iter()
                 .any(|d| matches!(d.name.as_str(), "height" | "max-height"));
 
-            if scroll.is_some() && matches!(h, Axis::Auto) && !ruled {
+            if scroll.is_some() && matches!(h, Axis::Auto) && !ruled && !y.0 {
                 self.find("scroll_height", e.name_span, "a ScrollingFrame with an automatic height grows with its content and never scrolls; give it a `height`");
             }
         }
@@ -2493,6 +2537,23 @@ pub fn target_of(class: &str) -> Target {
     }
 }
 
+/// A length as the value of an Enamel `w-` or `h-` class: `full`,
+/// `[50%]`, `[120px]`. Enamel has no class for a scale and an offset
+/// together, `calc(100% - 8px)`.
+fn len_class(l: css::Len) -> Option<String> {
+    match (l.scale, l.offset) {
+        (0.0, 0.0) => Some("0".into()),
+
+        (1.0, 0.0) => Some("full".into()),
+
+        (s, 0.0) => Some(format!("[{}%]", css::num(s * 100.0))),
+
+        (0.0, o) => Some(format!("[{}px]", css::num(o))),
+
+        _ => None,
+    }
+}
+
 /// A RichText tag written as markup text: `\<b>`.
 fn escape_tag(tag: &str) -> String {
     tag.replace('<', "\\<")
@@ -3068,6 +3129,28 @@ mod tests {
             !out.contains("<UIStroke") && out.contains("<UICorner"),
             "{out}"
         );
+    }
+
+    /// Game UI 10: a size class replaces Silk's size on its axis, and
+    /// Silk names its own size on the other axis for Enamel.
+    #[test]
+    fn a_size_class_replaces_the_size_on_its_axis() {
+        let out = with_enamel("return <div className=\"w-full h-full\" />\n");
+        assert!(!out.contains("Size="), "{out}");
+        assert!(out.contains("ClassName=\"w-full h-full\""), "{out}");
+
+        let out = with_enamel("return <div className=\"w-full\" />\n");
+        assert!(!out.contains("Size="), "{out}");
+        assert!(out.contains("ClassName=\"w-full h-0 h-auto\""), "{out}");
+
+        let out = with_enamel("return <div className=\"h-full\" />\n");
+        assert!(out.contains("ClassName=\"h-full w-full\""), "{out}");
+
+        let out = with_enamel("return <button className=\"w-auto\">Go</button>\n");
+        assert!(out.contains("ClassName=\"w-auto w-0 h-0 h-auto\""), "{out}");
+
+        let out = with_enamel("return <img className=\"h-full\" width=\"32\" />\n");
+        assert!(out.contains("ClassName=\"h-full w-[32px]\""), "{out}");
     }
 
     /// Game UI 12: a classed child on the line of its box compiles as it
