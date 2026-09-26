@@ -156,6 +156,8 @@ struct Writer<'a> {
     /// Elements whose children run in a row: a flex row, or a button
     /// that holds an icon beside its text.
     row_parents: HashSet<usize>,
+    /// Silk elements that become a TextLabel, a TextButton, or a TextBox.
+    text_boxes: HashSet<usize>,
     uses_rich: bool,
     uses_not: bool,
     reps: Vec<(usize, usize, String)>,
@@ -206,6 +208,7 @@ impl<'a> Writer<'a> {
             covered: vec![false; n],
             order: HashMap::new(),
             row_parents: HashSet::new(),
+            text_boxes: HashSet::new(),
             uses_rich: false,
             uses_not: false,
             reps: Vec::new(),
@@ -347,18 +350,55 @@ impl<'a> Writer<'a> {
                 )
             });
 
+            // A child of a flex or a grid box is an item of its own, as CSS
+            // makes it. An inline tag with a class keeps its instance for
+            // the class, unless text stands beside it: RichText then holds
+            // it, as a browser runs it on in the line.
+            let item = e.parent.is_some_and(|p| self.lays_out_items(p));
+            let classed = e.attr("className").or(e.attr("class")).is_some();
+
             self.foldable[i] = !events
                 && e.hole_owner.is_none_or(|_| e.parent.is_some())
                 && e.parent.is_some()
                 && children_fold
                 && match tag.kind {
-                    Kind::Inline | Kind::Break => true,
+                    Kind::Break => true,
 
-                    Kind::Link => parent_text || parent_holds_text,
+                    Kind::Inline => !item && (!classed || parent_text),
+
+                    Kind::Link => {
+                        !item && (!classed || parent_text) && (parent_text || parent_holds_text)
+                    }
 
                     _ => false,
                 };
         }
+    }
+
+    /// Whether a box is a flex or a grid container: its `style`, a rule
+    /// of the file, or an Enamel class says so.
+    fn lays_out_items(&self, i: usize) -> bool {
+        let e = self.el(i);
+        let display = decls_of(self.src, e)
+            .into_iter()
+            .chain(self.static_decls(i))
+            .any(|d| {
+                d.name == "display"
+                    && matches!(
+                        d.value.trim(),
+                        "flex" | "inline-flex" | "grid" | "inline-grid"
+                    )
+            });
+        let classes = ["class", "className"]
+            .iter()
+            .filter_map(|n| e.text(self.src, n))
+            .flat_map(str::split_whitespace);
+        let enamel = self.opts.enamel
+            && crate::enamel::sets(classes, &self.opts.theme)
+                .iter()
+                .any(|k| k.starts_with("layout:") && k != crate::enamel::ARRANGE);
+
+        display || enamel
     }
 
     fn has_literal(&self, i: usize) -> bool {
@@ -922,6 +962,10 @@ impl<'a> Writer<'a> {
         let layout_kind = style.layout_kind.or(statics.layout_kind);
         let text_class = matches!(class, "TextLabel" | "TextButton" | "TextBox");
 
+        if text_class {
+            self.text_boxes.insert(i);
+        }
+
         // Enamel reads the same classes; Silk leaves the properties its
         // utilities set to it, and a background the author wrote keeps
         // its color.
@@ -1147,7 +1191,10 @@ impl<'a> Writer<'a> {
             .chain(&static_decls)
             .any(|d| d.name == "flex-direction" && d.value.trim().starts_with("column"));
 
-        if button_row || (layout_kind == Some(Layout::Flex) && !column) {
+        let enamel_row =
+            replaced.contains(crate::enamel::ROW) && !replaced.contains(crate::enamel::COLUMN);
+
+        if button_row || (layout_kind == Some(Layout::Flex) && !column) || enamel_row {
             self.row_parents.insert(i);
         }
 
@@ -1775,11 +1822,7 @@ impl<'a> Writer<'a> {
 
         if tags.is_some() || href.is_some() {
             self.uses_helper = true;
-            let (open, close) = match e.in_children {
-                true => ("{", "}"),
-
-                false => ("", ""),
-            };
+            let (open, close) = self.hole_braces(i);
             // The element builds inside a function the helper calls once:
             // the markup compiler reads markup outside a function in a
             // child as a condition that never updates.
@@ -1797,6 +1840,29 @@ impl<'a> Writer<'a> {
                     href.unwrap_or_else(|| "nil".into())
                 ),
             );
+        }
+    }
+
+    /// The text around the helper call that stands for element `i`. Among
+    /// children it is a `{ }` hole. In a class with a `Text` property the
+    /// markup compiler reads a hole as text, so a fragment holds it there
+    /// and it stays a child.
+    fn hole_braces(&self, i: usize) -> (&'static str, &'static str) {
+        let e = self.el(i);
+        let in_text = e.parent.is_some_and(|p| {
+            self.text_boxes.contains(&p)
+                || matches!(
+                    self.el(p).name.as_str(),
+                    "TextLabel" | "TextButton" | "TextBox"
+                )
+        });
+
+        match (e.in_children, in_text) {
+            (true, true) => ("<>{", "}</>"),
+
+            (true, false) => ("{", "}"),
+
+            (false, _) => ("", ""),
         }
     }
 
@@ -3179,6 +3245,50 @@ mod tests {
 
         let out = text("return <div className=\"panel\" />\n");
         assert!(!out.contains("BackgroundTransparency"), "{out}");
+    }
+
+    /// Game UI 11: a child of a flex box is a flex item, and a classed
+    /// inline tag with no text beside it keeps its instance.
+    #[test]
+    fn a_flex_item_and_a_classed_span_keep_their_instances() {
+        let out = with_enamel(
+            "return <div className=\"flex justify-between\">\n  <span className=\"text-white\">L</span>\n  <span className=\"text-white\">R</span>\n</div>\n",
+        );
+        assert!(out.contains("<Frame Name={\"div\"}"), "{out}");
+        assert_eq!(
+            out.matches("<TextLabel Name={\"span\"}").count(),
+            2,
+            "{out}"
+        );
+        assert!(out.contains("LayoutOrder={2}"), "{out}");
+
+        let out =
+            silk("return <div style={{ display = \"flex\" }}><span>a</span><span>b</span></div>\n");
+        assert_eq!(
+            out.matches("<TextLabel Name={\"span\"}").count(),
+            2,
+            "{out}"
+        );
+
+        let out = with_enamel(
+            "return <button className=\"group\"><span className=\"group-hover:text-yellow-400\">Inner</span></button>\n",
+        );
+        assert!(out.contains("<TextLabel Name={\"span\"}"), "{out}");
+        // A hole in a TextButton is text to the markup compiler; a
+        // fragment keeps the wrapper a child.
+        assert!(
+            out.contains("<>{__silk(function() return <TextLabel"),
+            "{out}"
+        );
+        assert!(out.contains("nil)}</></TextButton>"), "{out}");
+
+        // Text beside it: the class has no instance, and the lint says so.
+        let out = silk("return <p>Hi <b className=\"x\">there</b></p>\n");
+        assert!(out.contains("\\<b>there\\</b>"), "{out}");
+        assert!(
+            lints("return <p>Hi <b className=\"x\">there</b></p>\n")
+                .contains(&"no_effect".to_string())
+        );
     }
 
     /// Game UI 12: a classed child on the line of its box compiles as it

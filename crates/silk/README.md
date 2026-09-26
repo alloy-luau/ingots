@@ -82,6 +82,13 @@ boxes becomes a Frame, and each run of its text becomes a TextLabel of its
 own. An element with `onClick` becomes a button: a Frame is a TextButton,
 and an ImageLabel is an ImageButton.
 
+A child of a flex or a grid box is an item of its own, as CSS makes it:
+`<div className="flex"><span>L</span><span>R</span></div>` is a Frame
+with two TextLabels in a row. An inline tag with a class keeps its own
+instance too, so the class has something to style, unless text stands
+beside it. In `<p>Hi <b className="x">there</b></p>` the `b` is RichText,
+and the `no_effect` lint says that the class sets nothing.
+
 `select`, `iframe`, `svg`, `script`, a checkbox, and the other elements
 with no Roblox form are `unsupported_tag` errors.
 
