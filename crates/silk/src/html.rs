@@ -532,11 +532,13 @@ impl Raw<'_> {
         }
     }
 
-    fn not(self) -> String {
+    /// The value negated. An expression goes through the `_not` helper,
+    /// since it may be a source: `not busy` of a function is always false.
+    fn not(self, helper: &str) -> String {
         match self.on() {
             Some(b) => (!b).to_string(),
 
-            None => format!("not ({})", self.luau()),
+            None => format!("{helper}_not({})", self.luau()),
         }
     }
 }
@@ -830,8 +832,9 @@ pub fn attributes(tag: &Tag, input_type: Option<&str>) -> Vec<(&'static str, &'s
     out
 }
 
-/// What an attribute on a tag becomes.
-pub fn map(tag: &Tag, name: &str, value: Raw, input_type: Option<&str>) -> Mapped {
+/// What an attribute on a tag becomes. `helper` names the helpers the
+/// transform writes.
+pub fn map(tag: &Tag, name: &str, value: Raw, input_type: Option<&str>, helper: &str) -> Mapped {
     let lower = name.to_ascii_lowercase();
 
     // A Roblox name, `key`, or an ingot's prop passes as written.
@@ -864,7 +867,7 @@ pub fn map(tag: &Tag, name: &str, value: Raw, input_type: Option<&str>) -> Mappe
 
         (Input, "type") => Mapped::Read,
 
-        (_, "hidden") => Mapped::Props(vec![("Visible", value.not())]),
+        (_, "hidden") => Mapped::Props(vec![("Visible", value.not(helper))]),
 
         (_, "tabindex") => Mapped::Props(vec![(
             "SelectionOrder",
@@ -908,20 +911,20 @@ pub fn map(tag: &Tag, name: &str, value: Raw, input_type: Option<&str>) -> Mappe
 
         (Input | TextArea, "value" | "defaultvalue") | (Button, "value") => Mapped::Rename("Text"),
 
-        (Input | TextArea, "readonly") => Mapped::Props(vec![("TextEditable", value.not())]),
+        (Input | TextArea, "readonly") => Mapped::Props(vec![("TextEditable", value.not(helper))]),
 
         (Input, "disabled") if matches!(input_type, Some("button" | "submit" | "reset")) => {
-            Mapped::Props(vec![("Interactable", value.not())])
+            Mapped::Props(vec![("Interactable", value.not(helper))])
         }
 
         (Input | TextArea, "disabled") => Mapped::Props(vec![
-            ("TextEditable", value.not()),
-            ("Interactable", value.not()),
+            ("TextEditable", value.not(helper)),
+            ("Interactable", value.not(helper)),
         ]),
 
         (Button, "disabled") => Mapped::Props(vec![
-            ("Interactable", value.not()),
-            ("AutoButtonColor", value.not()),
+            ("Interactable", value.not(helper)),
+            ("AutoButtonColor", value.not(helper)),
         ]),
 
         (TextArea, "rows" | "cols" | "wrap") => Mapped::Read,
@@ -1041,31 +1044,34 @@ mod tests {
         let button = tag("button").unwrap();
 
         assert_eq!(
-            map(img, "src", Raw::Str("rbxassetid://1"), None),
+            map(img, "src", Raw::Str("rbxassetid://1"), None, "__silk"),
             Mapped::Rename("Image")
         );
         assert_eq!(
-            map(button, "onClick", Raw::Expr("go"), None),
+            map(button, "onClick", Raw::Expr("go"), None, "__silk"),
             Mapped::Event("Activated")
         );
         assert_eq!(
-            map(button, "disabled", Raw::Bare, None),
+            map(button, "disabled", Raw::Bare, None, "__silk"),
             Mapped::Props(vec![
                 ("Interactable", "false".into()),
                 ("AutoButtonColor", "false".into())
             ])
         );
         assert_eq!(
-            map(img, "hidden", Raw::Expr("x"), None),
-            Mapped::Props(vec![("Visible", "not (x)".into())])
+            map(img, "hidden", Raw::Expr("x"), None, "__silk"),
+            Mapped::Props(vec![("Visible", "__silk_not(x)".into())])
         );
-        assert_eq!(map(img, "aria-label", Raw::Str("a"), None), Mapped::Drop);
+        assert_eq!(
+            map(img, "aria-label", Raw::Str("a"), None, "__silk"),
+            Mapped::Drop
+        );
         assert_eq!(react_name("class"), Some("className"));
         assert_eq!(react_name("onclick"), Some("onClick"));
         assert_eq!(react_name("onClick"), None);
         assert_eq!(react_name("src"), None);
         assert_eq!(
-            map(img, "BackgroundColor3", Raw::Expr("c"), None),
+            map(img, "BackgroundColor3", Raw::Expr("c"), None, "__silk"),
             Mapped::Keep
         );
     }

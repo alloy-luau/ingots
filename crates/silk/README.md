@@ -100,6 +100,10 @@ with no Roblox form are `unsupported_tag` errors.
 | `autoPlay`, `loop`, `muted` | `Playing`, `Looped`, `Volume` |
 | `onClick`, `onMouseEnter`, `onMouseLeave`, `onMouseDown`, `onMouseUp`, `onMouseMove`, `onContextMenu`, `onFocus`, `onBlur`, `onChange`, `onKeyDown`, `onKeyUp` | `Activated`, `MouseEnter`, `MouseLeave`, `MouseButton1Down`, `MouseButton1Up`, `MouseMoved`, `MouseButton2Click`, `Focused`, `FocusLost`, `FocusLost`, `InputBegan`, `InputEnded` |
 
+`hidden`, `readOnly`, and `disabled` negate their value. A source stays
+live: `disabled={busy}` writes a function that reads `busy`, so the
+button follows it.
+
 `aria-*`, `data-*`, `alt`, and the other attributes with nothing behind
 them drop without a word. `title`, `maxLength`, `colSpan`, and a few
 others drop with a `no_effect` warning.

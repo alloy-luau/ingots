@@ -154,6 +154,7 @@ struct Writer<'a> {
     /// that holds an icon beside its text.
     row_parents: HashSet<usize>,
     uses_rich: bool,
+    uses_not: bool,
     reps: Vec<(usize, usize, String)>,
     ins: Vec<(usize, i64, usize, String)>,
     seq: usize,
@@ -203,6 +204,7 @@ impl<'a> Writer<'a> {
             order: HashMap::new(),
             row_parents: HashSet::new(),
             uses_rich: false,
+            uses_not: false,
             reps: Vec::new(),
             ins: Vec::new(),
             seq: 0,
@@ -270,6 +272,10 @@ impl<'a> Writer<'a> {
 
         if self.uses_rich {
             lead.push_str(&rich_text(&self.opts.helper));
+        }
+
+        if self.uses_not {
+            lead.push_str(&not_text(&self.opts.helper));
         }
 
         if !lead.is_empty() {
@@ -1231,7 +1237,7 @@ impl<'a> Writer<'a> {
                 Value::Expr(s, t) => Raw::Expr(&src[s..t]),
             };
 
-            match html::map(tag, &a.name, raw, input_type) {
+            match html::map(tag, &a.name, raw, input_type, &self.opts.helper) {
                 Mapped::Rename(to) => {
                     self.replace(a.name_span.0, a.name_span.1, to);
                     written.insert(to.to_string());
@@ -1267,6 +1273,7 @@ impl<'a> Writer<'a> {
                         .map(|(k, v)| format!("{k}={{{v}}}"))
                         .collect::<Vec<_>>()
                         .join(" ");
+                    self.uses_not |= text.contains(&format!("{}_not(", self.opts.helper));
                     self.replace(a.span.0, a.span.1, text);
 
                     for (k, _) in list {
@@ -2621,6 +2628,17 @@ return (string.gsub(string.gsub(string.gsub(tostring(v), \"&\", \"&amp;\"), \"<\
     )
 }
 
+/// The negation helper as one line of Alloy: `disabled={busy}` stays
+/// live when `busy` is a source, which a reactive library reads as a
+/// function.
+pub fn not_text(helper: &str) -> String {
+    format!(
+        "local function {helper}_not(v: any): any \
+if type(v) == \"function\" then local f: any = v return function() return not f() end end \
+return not v end "
+    )
+}
+
 /// Applies edits the way the host does, for tests.
 #[cfg(test)]
 pub fn apply(source: &str, edits: &[Edit]) -> String {
@@ -3055,6 +3073,25 @@ mod tests {
         let out = silk("return <div><p>a</p><UIGradient /><Frame /></div>\n");
         assert!(out.contains("<UIGradient />"), "{out}");
         assert!(out.contains("<Frame LayoutOrder={2} />"), "{out}");
+    }
+
+    /// Game UI 17: `disabled`, `hidden`, and `readOnly` negate a source
+    /// as a function that reads it.
+    #[test]
+    fn a_negated_attribute_reads_a_source() {
+        let out = silk(
+            "return <div><button disabled={busy}>Go</button><p hidden={busy}>x</p><input readOnly={busy} /><p hidden>y</p></div>\n",
+        );
+
+        assert!(out.contains("Interactable={__silk_not(busy)}"), "{out}");
+        assert!(out.contains("AutoButtonColor={__silk_not(busy)}"), "{out}");
+        assert!(out.contains("Visible={__silk_not(busy)}"), "{out}");
+        assert!(out.contains("TextEditable={__silk_not(busy)}"), "{out}");
+        assert!(out.contains("Visible={false}"), "{out}");
+        assert!(
+            out.contains("local function __silk_not(v: any): any if type(v) == \"function\""),
+            "{out}"
+        );
     }
 
     /// Game UI 28: a block comment holds no tag, as a line comment does.
