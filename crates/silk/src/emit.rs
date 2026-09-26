@@ -2079,8 +2079,10 @@ impl<'a> Writer<'a> {
                     .map(|(axis, ..)| format!(" {axis}-auto"))
                     .collect();
 
+                // An `AutomaticSize` the author writes wins.
                 if let Some(t) = class_end
                     && !more.is_empty()
+                    && !written.contains("AutomaticSize")
                 {
                     self.insert(t, RANK_TEXT, more);
                 }
@@ -5043,6 +5045,17 @@ assert(__silk_not(false) == true)
             lints("return <div style={{ width = w }}></div>\n")
                 .contains(&"dynamic_style".to_string())
         );
+    }
+
+    /// An `AutomaticSize` the author writes keeps Silk's automatic axis
+    /// out of the classes, so Enamel writes no second one.
+    #[test]
+    fn a_written_automatic_size_wins() {
+        let out = with_enamel(
+            "return <button className=\"h-10\" AutomaticSize={Enum.AutomaticSize.X}>Go</button>\n",
+        );
+
+        assert!(out.contains("ClassName=\"h-10\""), "{out}");
     }
 
     #[test]
