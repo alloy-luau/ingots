@@ -466,6 +466,7 @@ pub const DYNAMIC: &[&str] = &[
     "background-color",
     "background-gradient",
     "border-color",
+    "border-image-source",
     "border-transparency",
     "border-width",
     "color",

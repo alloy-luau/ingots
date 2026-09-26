@@ -1481,6 +1481,8 @@ impl<'a> Writer<'a> {
                                         | "height"
                                         | "max-height"
                                         | "position"
+                                        | "border-image"
+                                        | "border-image-source"
                                         | "appearance"
                                         | "-webkit-appearance"
                                         | "top"
@@ -1526,13 +1528,64 @@ impl<'a> Writer<'a> {
             })
             .collect();
 
+        // The style: the element's own, and what the file's rules decide
+        // about its class.
+        let static_decls = self.static_decls(i);
+        let own_decls = self.style_of(i, true);
+        // A Luau value in `style` goes to the one property behind it, so a
+        // source stays live: `style={{ scale = grow }}`. A property of the
+        // element takes the value where the `style` stands.
+        let dynamic = match e.attr("style").map(|a| a.value) {
+            Some(Value::Expr(s, t)) => css::dynamic_table(&src[s..t], s),
+
+            _ => Vec::new(),
+        };
+
+        // `border-image` with a `url()` is a 9-slice: a box becomes an
+        // ImageLabel and a button an ImageButton, and the text stands in
+        // TextLabels of its own, as beside a box.
+        let slice_at = static_decls
+            .iter()
+            .chain(&own_decls)
+            .find(|d| d.name.starts_with("border-image") && d.value.contains("url("))
+            .map(|d| d.name_span)
+            .or(dynamic
+                .iter()
+                .find(|(n, ..)| n == "border-image-source")
+                .map(|(.., span)| *span));
+        let sliced = slice_at.is_some()
+            && matches!(
+                tag.kind,
+                Kind::Block
+                    | Kind::Text
+                    | Kind::Inline
+                    | Kind::Cell
+                    | Kind::List
+                    | Kind::Button
+                    | Kind::Link
+                    | Kind::Image
+            );
+
+        if let (Some(span), false) = (slice_at, sliced) {
+            self.find(
+                "no_effect",
+                span,
+                format!(
+                    "`<{}>` takes no 9-slice; put it on a box, a button, or an `<img>`",
+                    tag.name
+                ),
+            );
+        }
+
+        let boxed = !flow_boxes.is_empty() || sliced;
+
         // The kind the element takes with the content it has.
         let mut kind = tag.kind;
 
         match kind {
-            Kind::Block if holds_text && flow_boxes.is_empty() => kind = Kind::Text,
+            Kind::Block if holds_text && !boxed => kind = Kind::Text,
 
-            Kind::Text | Kind::Cell | Kind::Inline if !flow_boxes.is_empty() => kind = Kind::Block,
+            Kind::Text | Kind::Cell | Kind::Inline if boxed => kind = Kind::Block,
 
             _ => {}
         }
@@ -1541,11 +1594,11 @@ impl<'a> Writer<'a> {
             matches!(tag.kind, Kind::Text | Kind::Cell | Kind::Inline) && kind == Kind::Block;
         // A button or a link that holds a box, an icon beside its text,
         // lays both out in a row.
-        let button_row = matches!(tag.kind, Kind::Button | Kind::Link) && !flow_boxes.is_empty();
+        let button_row = matches!(tag.kind, Kind::Button | Kind::Link) && boxed;
         // Text beside a box stands in a TextLabel of its own, as a
         // browser puts it in an anonymous box.
         let wrap_runs = holds_text
-            && !flow_boxes.is_empty()
+            && boxed
             && (demoted
                 || button_row
                 || matches!(
@@ -1559,13 +1612,8 @@ impl<'a> Writer<'a> {
             )
         });
 
-        // The style: the element's own, and what the file's rules decide
-        // about its class.
         let mut statics = Out::default();
-        let static_decls = self.static_decls(i);
         let mut list_style_none = false;
-
-        let own_decls = self.style_of(i, true);
 
         for d in static_decls.iter().chain(&own_decls) {
             if matches!(d.name.as_str(), "list-style" | "list-style-type") {
@@ -1592,7 +1640,23 @@ impl<'a> Writer<'a> {
             };
         }
 
-        let target = target_of(class);
+        if sliced {
+            class = match class {
+                "Frame" | "TextLabel" => "ImageLabel",
+
+                "TextButton" => "ImageButton",
+
+                c => c,
+            };
+        }
+
+        // A box with a 9-slice takes the image properties, and its text
+        // properties go to the text inside it.
+        let target = match sliced && tag.kind != Kind::Image {
+            true => Target::Panel,
+
+            false => target_of(class),
+        };
         let ctx = Ctx {
             vars: &self.vars,
             fonts: &self.opts.fonts,
@@ -1612,9 +1676,36 @@ impl<'a> Writer<'a> {
         let mut decls = self.inherited(i);
         decls.extend(own_decls.iter().cloned());
         props::apply(&decls, &ctx, &mut style);
+        // The runs of text take the text properties of the element.
+        let mut run_style = Out::default();
+        props::apply(
+            &decls,
+            &Ctx {
+                target: Target::Text,
+                ..ctx
+            },
+            &mut run_style,
+        );
 
         for p in std::mem::take(&mut style.problems) {
+            // A `SliceCenter` on the tag places the slice, and an element
+            // with no 9-slice reports it once.
+            if (e.attr("SliceCenter").is_some() || !sliced)
+                && p.message.starts_with(props::UNPLACED_SLICE)
+            {
+                continue;
+            }
+
             self.find(p.lint, p.span, p.message);
+        }
+
+        if !sliced {
+            style.props.retain(|(k, _)| {
+                !matches!(
+                    (slice_at.is_some(), k.as_str()),
+                    (true, "Image" | "ScaleType" | "SliceCenter" | "SliceScale")
+                )
+            });
         }
 
         // An Enamel class that scrolls, `overflow-y-auto`, makes the box a
@@ -1928,6 +2019,12 @@ impl<'a> Writer<'a> {
         d.props.retain(|(k, _)| !replaced.contains(k));
         d.mods.retain(|(c, _)| !replaced.contains(*c));
 
+        // A 9-slice draws the border, and a CSS corner does not clip it.
+        if sliced {
+            d.mods
+                .retain(|(c, _)| !matches!(*c, "UIStroke" | "UICorner"));
+        }
+
         // `appearance: none` drops the look a browser gives a control, as
         // Tailwind's reset does: the background, the border, the corner,
         // and the padding.
@@ -1943,14 +2040,6 @@ impl<'a> Writer<'a> {
             d.set("BackgroundTransparency", "1");
         }
 
-        // A Luau value in `style` goes to the one property behind it, so a
-        // source stays live: `style={{ scale = grow }}`. A property of the
-        // element takes the value where the `style` stands.
-        let dynamic = match e.attr("style").map(|a| a.value) {
-            Some(Value::Expr(s, t)) => css::dynamic_table(&src[s..t], s),
-
-            _ => Vec::new(),
-        };
         let mut in_place: Vec<(&'static str, String)> = Vec::new();
 
         for (name, value, span) in &dynamic {
@@ -1964,6 +2053,8 @@ impl<'a> Writer<'a> {
                 "rotate" => "Rotation",
 
                 "z-index" => "ZIndex",
+
+                "border-image-source" if sliced => "Image",
 
                 _ => continue,
             };
@@ -2204,6 +2295,10 @@ impl<'a> Writer<'a> {
         m.background = style.background;
         m.opacity = style.opacity;
         props::finish_colors(&mut m, target, false);
+
+        if sliced && m.get("ScaleType").is_none() {
+            m.set("ScaleType", "Enum.ScaleType.Slice");
+        }
 
         // A Luau value for a modifier goes to its child. The child stands
         // past the open tag, and an edit keeps its line count, so a value
@@ -2584,9 +2679,9 @@ impl<'a> Writer<'a> {
                 }
             }
 
-            self.write_runs(i, &runs, &run_orders, tag, &style);
+            self.write_runs(i, &runs, &run_orders, tag, &run_style);
         } else if wrap_runs {
-            self.write_runs(i, &runs, &HashMap::new(), tag, &style);
+            self.write_runs(i, &runs, &HashMap::new(), tag, &run_style);
         }
 
         // A box holds no text: a space between two boxes, or a break with
@@ -5264,6 +5359,76 @@ assert(__silk_not(false) == true)
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    /// LANG_BUGS 70: `border-image` with a `url()` is a 9-slice. A box
+    /// becomes an ImageLabel and a button an ImageButton, with the slice
+    /// as its `SliceCenter`, and its text stands in TextLabels of its own.
+    /// A Luau `borderImageSource` stays live, in every factory.
+    #[test]
+    fn a_border_image_url_is_a_nine_slice() {
+        let src = "return <div>\n  <div style={{ borderImage = 'url(rbxassetid://123) 4 fill', borderImageSize = 32 }}>\n    <p>Hi</p>\n  </div>\n  <button style={{ borderImage = 'url(rbxassetid://7) 3 3 5 3 fill / 6px', borderImageSize = '48px', color = '#ffffff' }}>Buy</button>\n</div>\n";
+        let fusion = Options {
+            factory: Factory {
+                table: true,
+                create: Some("New".into()),
+                compute: Some(("computed".into(), "use".into())),
+            },
+            ..Options::default()
+        };
+
+        for out in [
+            vide(src),
+            silk(src),
+            apply(src, &run(src, "a.alx", &fusion).edits),
+        ] {
+            assert!(out.contains("<ImageLabel Name={\"div\"}"), "{out}");
+            assert!(out.contains("Image={\"rbxassetid://123\"} ScaleType={Enum.ScaleType.Slice} SliceCenter={Rect.new(4, 4, 28, 28)}"), "{out}");
+            assert!(out.contains("<ImageButton Name={\"button\"}"), "{out}");
+            assert!(
+                out.contains("SliceCenter={Rect.new(3, 3, 45, 43)} SliceScale={2}"),
+                "{out}"
+            );
+            assert!(
+                out.contains("TextColor3={Color3.fromRGB(255, 255, 255)} TextSize={13} FontFace="),
+                "{out}"
+            );
+            assert!(out.contains("LayoutOrder={1}>Buy</TextLabel>"), "{out}");
+            assert!(!out.contains("UIStroke"), "{out}");
+            assert!(!out.contains("UICorner"), "{out}");
+        }
+
+        // A live image id, with the Roblox slice on the tag.
+        let src = "return <button style={{ borderImageSource = face }} SliceCenter={center}><span className=\"x\">Go</span></button>\n";
+        assert!(lints(src).is_empty(), "{:?}", lints(src));
+
+        for out in [
+            vide(src),
+            silk(src),
+            apply(src, &run(src, "a.alx", &fusion).edits),
+        ] {
+            assert!(out.contains("<ImageButton"), "{out}");
+            assert!(out.contains("Image={face}"), "{out}");
+            assert!(out.contains("ScaleType={Enum.ScaleType.Slice}"), "{out}");
+            assert!(out.contains("SliceCenter={center}"), "{out}");
+        }
+
+        // A rule of one class makes the element an ImageLabel.
+        let out = silk(
+            "return <div>\n<style>.panel { border-image: url(rbxassetid://5) 2 fill; border-image-size: 48px; border-image-width: 3 }</style>\n<div className=\"panel\" />\n</div>\n",
+        );
+        assert!(out.contains("<ImageLabel Name={\"div\"}"), "{out}");
+        assert!(out.contains("{ \".panel\", 100000, { Image = \"rbxassetid://5\", ScaleType = Enum.ScaleType.Slice, SliceCenter = Rect.new(2, 2, 46, 46), SliceScale = 3 } }"), "{out}");
+
+        // With no size of the image, the slice has no place, and an input
+        // takes no 9-slice.
+        assert!(
+            lints("return <div style={{ borderImage = 'url(rbxassetid://9) 4 fill' }} />\n")
+                .contains(&"bad_value".to_string())
+        );
+        let src = "return <input style={{ borderImage = 'url(rbxassetid://9) 4 fill' }} />\n";
+        assert_eq!(lints(src), vec!["no_effect".to_string()]);
+        assert!(!silk(src).contains("Image="), "{}", silk(src));
     }
 
     /// LANG_BUGS 68: the markup compiler finds the end of a hole as it

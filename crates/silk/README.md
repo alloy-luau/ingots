@@ -67,6 +67,8 @@ Silk follows React where React and HTML differ:
   then reads in place of Enamel. A box with no background color shows
   white under the gradient, as CSS shows a gradient. A gradient of
   literal colors is CSS: `background: linear-gradient(...)`.
+- A live image id for a 9-slice is Luau: `borderImageSource` takes an
+  id or a source of one, as the `Image`. See [9-slice images](#9-slice-images).
 - Text takes HTML character references: `&copy;`, `&nbsp;`, `&mdash;`,
   `&#169;`.
 
@@ -256,6 +258,7 @@ A `style` table and a `<style>` rule take the same properties:
 | `padding` | a UIPadding |
 | `border`, `border-width`, `border-color`, `border-style`, `outline` | a UIStroke |
 | `border-image: linear-gradient()` in a `style` table | a UIGradient inside the UIStroke, which turns white so the gradient shows |
+| `border-image: url() 4 fill`, `border-image-slice`, `border-image-width`, `border-image-size` | a 9-slice: an ImageLabel or an ImageButton with `ScaleType.Slice`, `SliceCenter`, and `SliceScale` |
 | `border-radius` | a UICorner |
 | `display: flex`, `flex-direction`, `justify-content`, `align-items`, `gap`, `flex-wrap` | the UIListLayout |
 | `display: grid`, `grid-template-columns`, `grid-auto-rows`, `gap` | a UIGridLayout |
@@ -293,6 +296,38 @@ The priority is the CSS specificity, then the order of the rules, and
 `transition`, and a few others set nothing and report `no_effect`.
 Sibling combinators, attribute selectors, most pseudo-classes,
 pseudo-elements, and at-rules report `unsupported_css`.
+
+### 9-slice images
+
+`border-image` with a `url()` draws a 9-slice image, as CSS draws a
+border image. A box becomes an ImageLabel, and a button, or a box with
+`onClick`, an ImageButton. Its text stands in TextLabels of its own, as
+text beside a box does, and takes the text properties of the element.
+
+```css
+.panel { border-image: url(rbxassetid://123) 4 fill / 8px; border-image-size: 32px; }
+```
+
+The slice is 1 to 4 numbers in from the edges, in pixels of the image,
+as CSS reads it. Roblox measures `SliceCenter` from the top left corner
+of the image, and a script cannot read the size of an image. So the
+slice needs `border-image-size`, the width and the height of the image
+in pixels. Above, the slice is `SliceCenter = Rect.new(4, 4, 28, 28)`.
+A `SliceCenter` on the tag takes the place of the slice and the size.
+The width after the slash, or `border-image-width`, is the
+`SliceScale`: a number as it is, or a length over the top slice, so
+`4 fill / 8px` draws the edges at twice their size. The middle always
+draws, as `fill` asks. A button drops the border and the corner of its
+browser look, since the image draws the border.
+
+A live image id goes in `borderImageSource`, and the Roblox properties
+of the image go on the tag:
+
+```alx
+<div style={{ borderImageSource = id, imageRendering = "pixelated" }} SliceCenter={art.center} SliceScale={art.scale}>
+    {props.children}
+</div>
+```
 
 ## With Enamel
 
@@ -362,6 +397,7 @@ passes to the helper when the project sets one.
 | `<html>`, `<head>`, `<title>`, `<meta>`, `<body>` | yes | yes | yes |
 | the viewport scale | the helper builds the body | the helper builds the body | a `ref` |
 | a box with a child that places itself, `overflow-y-auto`, `appearance: none`, `border-image` | yes | yes | yes |
+| a 9-slice, and a live `borderImageSource` | yes, a source stays live | yes, a state stays live | yes, a binding stays live |
 | a Luau value in `style`, `borderTransparency`, `backgroundGradient` | yes, a source stays live | yes, a state stays live | yes, a binding stays live |
 | `className` tags, `href`, `onChange`, `maxLength` | the helper builds the element | the helper builds the element | a `ref` |
 | `disabled`, `hidden`, `readOnly` of a reactive value | a function | through `compute` | `map` |
@@ -406,6 +442,10 @@ shows its swatch.
 - A rule sets `Size` and `FontFace` whole. A rule with `width` alone takes
   an automatic height, and a rule with `font-weight` alone takes the
   default family.
+- A rule makes an element a 9-slice only when its selector is one
+  class, id, or tag that the element has as written. Silk decides the
+  class of an instance when it compiles, and a StyleRule cannot change
+  it.
 - A type selector matches the instance's `Name`. An element with an `id`
   has that `id` as its `Name`, so `h1` does not match `<h1 id="title">`;
   `#title` does.
