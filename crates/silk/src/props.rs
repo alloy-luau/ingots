@@ -412,6 +412,11 @@ pub fn catalog() -> Vec<Known> {
             &["none"],
         ),
         K("border-color", "`UIStroke.Color`", &[]),
+        K(
+            "border-image",
+            "a `UIGradient` inside the `UIStroke`, for `linear-gradient()`",
+            &["none"],
+        ),
         K("border-radius", "a `UICorner`: `CornerRadius`", &[]),
         K(
             "border-style",
@@ -607,6 +612,10 @@ pub fn catalog() -> Vec<Known> {
         K("z-index", "`ZIndex`", &[]),
     ]
 }
+
+/// The modifier key of a UIGradient that sits inside the UIStroke, for
+/// `border-image`: the emitter writes it as a child of the stroke.
+pub const STROKE_GRADIENT: &str = "UIStroke.UIGradient";
 
 /// The text properties CSS inherits from a box to the text inside it.
 pub const INHERITED: &[&str] = &[
@@ -926,6 +935,30 @@ pub fn apply(decls: &[Decl], ctx: &Ctx, out: &mut Out) {
 
                 None => bad(out),
             },
+
+            // A gradient along the border: a UIGradient inside the UIStroke.
+            // The stroke turns white, so the gradient's colors show as they
+            // are, as `border-image` replaces the border color.
+            "border-image" | "border-image-source" => {
+                let source = v.rfind(')').map_or(v, |end| &v[..=end]);
+
+                match gradient(source) {
+                    Some((seq, rotation, transparency)) => {
+                        out.modifier("UIStroke", "Color", "Color3.new(1, 1, 1)");
+                        out.modifier("UIStroke", "ApplyStrokeMode", "Enum.ApplyStrokeMode.Border");
+                        out.modifier(STROKE_GRADIENT, "Color", seq);
+                        out.modifier(STROKE_GRADIENT, "Rotation", num(rotation));
+
+                        if let Some(t) = transparency {
+                            out.modifier(STROKE_GRADIENT, "Transparency", t);
+                        }
+                    }
+
+                    None if lower == "none" => {}
+
+                    None => bad(out),
+                }
+            }
 
             "border-style" => match lower.as_str() {
                 "none" | "hidden" => out.modifier("UIStroke", "Enabled", "false"),
@@ -1483,6 +1516,23 @@ fn gradient(v: &str) -> Option<(String, f64, Option<String>)> {
             .and_then(|p| css::length(p))
             .map_or(k as f64 / (n - 1) as f64, |l| l.scale);
         stops.push((at.clamp(0.0, 1.0), c));
+    }
+
+    // A clear stop takes the color of the nearest stop that shows, as a
+    // browser mixes the colors premultiplied: `gold, transparent` fades
+    // the gold and does not darken it through black.
+    for k in 0..stops.len() {
+        if stops[k].1.a == 0.0 {
+            let near = (1..stops.len())
+                .flat_map(|d| [k.checked_sub(d), Some(k + d)])
+                .flatten()
+                .find(|&j| stops.get(j).is_some_and(|s| s.1.a > 0.0));
+
+            if let Some(j) = near {
+                let a = stops[k].1.a;
+                stops[k].1 = Rgba { a, ..stops[j].1 };
+            }
+        }
     }
 
     let colors = stops

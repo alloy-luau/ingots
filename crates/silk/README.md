@@ -220,6 +220,7 @@ A `style` table and a `<style>` rule take the same properties:
 | `width`, `height`, `min-*`, `max-*`, `aspect-ratio` | `Size`, `AutomaticSize`, a UISizeConstraint, a UIAspectRatioConstraint |
 | `padding` | a UIPadding |
 | `border`, `border-width`, `border-color`, `border-style`, `outline` | a UIStroke |
+| `border-image: linear-gradient()` in a `style` table | a UIGradient inside the UIStroke, which turns white so the gradient shows |
 | `border-radius` | a UICorner |
 | `display: flex`, `flex-direction`, `justify-content`, `align-items`, `gap`, `flex-wrap` | the UIListLayout |
 | `display: grid`, `grid-template-columns`, `grid-auto-rows`, `gap` | a UIGridLayout |

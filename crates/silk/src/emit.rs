@@ -1258,6 +1258,16 @@ impl<'a> Writer<'a> {
             }
 
             for (class, props) in &out.mods {
+                // A StyleRule reaches one pseudo-instance, not the gradient
+                // inside the stroke.
+                if class.contains('.') {
+                    if let Some(d) = group.iter().find(|d| d.name.starts_with("border-image")) {
+                        self.find("no_effect", d.name_span, "a StyleRule cannot reach the gradient inside the stroke; put `border-image` in the element's `style`");
+                    }
+
+                    continue;
+                }
+
                 out_rules.push(entry(&format!("{roblox_sel}::{class}"), props));
             }
 
@@ -2528,9 +2538,25 @@ impl<'a> Writer<'a> {
         {
             let explicit = self.m.element_children(i).any(|k| self.el(k).name == *c);
 
-            if explicit {
+            // A modifier inside another one, `UIStroke.UIGradient`, goes
+            // into its outer child below.
+            if explicit || c.contains('.') {
                 continue;
             }
+
+            let inner: String = m
+                .mods
+                .iter()
+                .filter_map(|(k, props)| Some((k.strip_prefix(c)?.strip_prefix('.')?, props)))
+                .map(|(class, props)| {
+                    let p: String = props.iter().map(|(k, v)| format!(" {k}={{{v}}}")).collect();
+
+                    (class, p)
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|(class, p)| format!("<{}{p} />", self.child_tag(class)))
+                .collect();
 
             let mut p: String = props.iter().map(|(k, v)| format!(" {k}={{{v}}}")).collect();
             let tag = self.child_tag(c);
@@ -2544,7 +2570,14 @@ impl<'a> Writer<'a> {
                 p.push_str(&format!(" Make={{{create}}}"));
             }
 
-            children.push_str(&format!("<{tag}{p} />"));
+            match inner.is_empty() {
+                true => children.push_str(&format!("<{tag}{p} />")),
+
+                false => {
+                    let close = tag.split(' ').next().unwrap_or(&tag).to_string();
+                    children.push_str(&format!("<{tag}{p}>{inner}</{close}>"));
+                }
+            }
         }
 
         match e.self_close {
@@ -3659,8 +3692,9 @@ pub fn child_text(helper: &str) -> String {
 if props.Make ~= nil then local make: any = props.Make local rest: any = {{}} \
 for k, v in props do if k ~= \"Class\" and k ~= \"Make\" then rest[k] = v end end return make(props.Class)(rest) end \
 local c: any = Instance.new(props.Class) \
+local function adopt(x: any) if typeof(x) == \"Instance\" then x.Parent = c elseif type(x) == \"table\" then for _, y in x do adopt(y) end end end \
 for k, v in props do if k == \"Class\" then continue end \
-if typeof(c[k]) == \"RBXScriptSignal\" then c[k]:Connect(v) else c[k] = v end end return c end "
+if type(k) ~= \"string\" then adopt(v) elseif typeof(c[k]) == \"RBXScriptSignal\" then c[k]:Connect(v) else c[k] = v end end return c end "
     )
 }
 
@@ -4832,7 +4866,7 @@ assert(__silk_not(false) == true)
     #[test]
     fn the_child_component_builds_through_make() {
         let script = format!(
-            "{}\nlocal made: any = nil\nlocal function make(class) return function(props) made = {{ class = class, props = props }} return 7 end end\nassert(__silk_child({{ Class = \"UIScale\", Scale = 2, Make = make }}) == 7)\nassert(made.class == \"UIScale\" and made.props.Scale == 2 and made.props.Make == nil and made.props.Class == nil)\n",
+            "{}\nlocal made: any = nil\nlocal function make(class) return function(props) made = {{ class = class, props = props }} return 7 end end\nassert(__silk_child({{ Class = \"UIScale\", Scale = 2, Make = make }}) == 7)\nassert(made.class == \"UIScale\" and made.props.Scale == 2 and made.props.Make == nil and made.props.Class == nil)\nlocal INST = {{}}\ntypeof = function(v) return if getmetatable(v) == INST then \"Instance\" else type(v) end\nInstance = {{ new = function(c) return setmetatable({{ ClassName = c }}, INST) end }}\nlocal g = Instance.new(\"UIGradient\")\nlocal stroke = __silk_child({{ Class = \"UIStroke\", Thickness = 6, g }})\nassert(stroke.Thickness == 6 and g.Parent == stroke)\n",
             child_text("__silk")
         );
         let path = std::env::temp_dir().join(format!("silk-child-{}.luau", std::process::id()));
@@ -5056,6 +5090,30 @@ assert(__silk_not(false) == true)
         );
 
         assert!(out.contains("ClassName=\"h-10\""), "{out}");
+    }
+
+    /// `border-image` puts a gradient along the border: a UIGradient
+    /// inside the UIStroke, whose white color lets the gradient show.
+    #[test]
+    fn a_border_image_is_a_gradient_in_the_stroke() {
+        let src = "return <div style={{ border = \"6px solid #FFD65C\", borderImage = \"linear-gradient(to right, #FFD65C, transparent) 1\" }} />\n";
+        let out = silk(src);
+
+        assert!(
+            out.contains("<UIStroke Thickness={6} Color={Color3.new(1, 1, 1)} Transparency={0} ApplyStrokeMode={Enum.ApplyStrokeMode.Border}><UIGradient Color={ColorSequence.new({ ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 214, 92)), ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 214, 92)) })} Rotation={0} Transparency={NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1) })} /></UIStroke>"),
+            "{out}"
+        );
+
+        let out = vide(src);
+        assert!(
+            out.contains("<__silk_child Class=\"UIStroke\" Thickness={6}"),
+            "{out}"
+        );
+        assert!(
+            out.contains("><__silk_child Class=\"UIGradient\" Color={ColorSequence.new("),
+            "{out}"
+        );
+        assert!(out.contains(" /></__silk_child>"), "{out}");
     }
 
     #[test]
