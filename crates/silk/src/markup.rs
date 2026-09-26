@@ -568,6 +568,31 @@ pub fn in_code(src: &str, at: usize) -> bool {
     true
 }
 
+/// The spans of the long comments of a file, `--[[ ]]` and `--[==[ ]==]`.
+/// It reads no strings, so markup text with a quote in it does not hide
+/// the comments after it.
+pub fn block_comments(src: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut from = 0;
+
+    while let Some(n) = src[from..].find("--[") {
+        let at = from + n;
+
+        from = match long_open(src, at + 2) {
+            Some(_) => {
+                let end = skip_long(src, at + 2);
+                out.push((at, end));
+
+                end
+            }
+
+            None => at + 3,
+        };
+    }
+
+    out
+}
+
 /// The end of a `--` comment at `i`, line or long.
 pub fn skip_comment(src: &str, i: usize) -> usize {
     let after = i + 2;

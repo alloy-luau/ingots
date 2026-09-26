@@ -76,8 +76,13 @@ fn void_findings(src: &str) -> Vec<Finding> {
         "source", "track", "wbr",
     ];
     let mut out = Vec::new();
+    let comments = crate::markup::block_comments(src);
 
     for (lt, _) in src.match_indices('<') {
+        if comments.iter().any(|(s, e)| *s < lt && lt < *e) {
+            continue;
+        }
+
         let rest = &src[lt + 1..];
         let name: String = rest
             .chars()
@@ -3011,6 +3016,19 @@ mod tests {
             out.contains("<Frame Name={\"tr\"}") && out.contains("LayoutOrder={2}"),
             "{out}"
         );
+    }
+
+    /// Game UI 28: a block comment holds no tag, as a line comment does.
+    #[test]
+    fn a_tag_in_a_block_comment_is_no_tag() {
+        let src = "--[[\n  Silk has no handler on `<input>` here.\n]]\nreturn <div><br>x</div>\n";
+        let voids = run(src, "a.alx", &Options::default())
+            .findings
+            .into_iter()
+            .filter(|f| f.lint == "void_tag")
+            .count();
+
+        assert_eq!(voids, 1, "only the `<br>` outside the comment");
     }
 
     #[test]
