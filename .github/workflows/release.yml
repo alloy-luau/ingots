@@ -1,0 +1,165 @@
+# Releases every ingot on a tag like v1.2.3: one zip per ingot and
+# platform, `<ingot>-ingot-<label>.zip`, on one GitHub release. A
+# project then names an ingot by this repository:
+#
+#   [ingots]
+#   silk = { repo = "alloy-luau/ingots" }
+#
+# and `alloy ingot install` fetches the zip for its machine. The job
+# fails when the tag and a crate version differ.
+#
+# Each zip holds `ingot.toml` and `<ingot>-ingot` at its root. The
+# manifest in the repository names the binary of a local build,
+# `../../target/release/silk`, so the zip's copy drops that line, and
+# the compiler then looks for `<ingot>-ingot`, with `.exe` on Windows.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # A dry run builds and zips every target and stops there.
+  workflow_dispatch:
+    inputs:
+      alloy_ref:
+        description: "The ref of alloy-luau/alloy that holds the guest crate"
+        default: main
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # The guest crate, `alloy-ingot`, comes from the compiler repository
+  # beside this one, as in a local checkout. A tag build reads the
+  # compiler's main.
+  ALLOY_REF: ${{ inputs.alloy_ref || 'main' }}
+
+jobs:
+  meta:
+    name: Read the tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: parse
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            version=$(grep -m1 '^version' crates/silk/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+            echo "dry run at version $version"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          for crate in crates/*/; do
+            found=$(grep -m1 '^version' "$crate/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')
+            if [ "$found" != "$version" ]; then
+              echo "the release is $version but ${crate}Cargo.toml says $found"
+              exit 1
+            fi
+          done
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.label }}
+    needs: meta
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The labels are the ones `alloy::target::label` gives a
+        # machine, so `alloy ingot install` finds the zip this builds.
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            label: linux-x64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            label: linux-arm64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            label: macos-arm64
+          # The Apple Silicon runner cross-compiles the Intel target.
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            label: macos-x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: windows-x64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ingots
+      - uses: actions/checkout@v4
+        with:
+          repository: alloy-luau/alloy
+          ref: ${{ env.ALLOY_REF }}
+          path: crates
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ingots
+      - name: Build every ingot
+        working-directory: ingots
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        working-directory: ingots
+        shell: bash
+        run: |
+          label="${{ matrix.label }}"
+          bin="target/${{ matrix.target }}/release"
+          mkdir -p dist
+          for dir in crates/*/; do
+            ingot=$(basename "$dir")
+            stage="stage/$ingot"
+            mkdir -p "$stage"
+            sed '/^binary = /d' "$dir/ingot.toml" > "$stage/ingot.toml"
+            cp "$bin/$ingot" "$stage/$ingot-ingot"
+            chmod +x "$stage/$ingot-ingot"
+            cp "$dir/README.md" "$stage/"
+            (cd "$stage" && zip -q "../../dist/$ingot-ingot-$label.zip" ingot.toml "$ingot-ingot" README.md)
+          done
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        working-directory: ingots
+        shell: pwsh
+        run: |
+          $label = "${{ matrix.label }}"
+          $bin = "target/${{ matrix.target }}/release"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          foreach ($dir in Get-ChildItem -Directory crates) {
+            $ingot = $dir.Name
+            $stage = "stage/$ingot"
+            New-Item -ItemType Directory -Force $stage | Out-Null
+            Get-Content "$($dir.FullName)/ingot.toml" | Where-Object { $_ -notmatch '^binary = ' } | Set-Content "$stage/ingot.toml"
+            Copy-Item "$bin/$ingot.exe" "$stage/$ingot-ingot.exe"
+            Copy-Item "$($dir.FullName)/README.md" $stage
+            Compress-Archive -Path "$stage/ingot.toml", "$stage/$ingot-ingot.exe", "$stage/README.md" -DestinationPath "dist/$ingot-ingot-$label.zip"
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}
+          path: ingots/dist/*.zip
+
+  release:
+    name: GitHub release
+    needs: [meta, build]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the release, with every zip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/*.zip
