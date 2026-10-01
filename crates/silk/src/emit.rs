@@ -106,11 +106,11 @@ fn void_findings(src: &str) -> Vec<Finding> {
             continue;
         }
 
-        let Some(gt) = rest.find('>').map(|n| lt + 1 + n) else {
+        let Some(gt) = tag_end(src, lt + 1 + name.len()) else {
             continue;
         };
 
-        if src[..gt].ends_with('/') || src[lt + 1..gt].contains('<') {
+        if src[..gt].ends_with('/') {
             continue;
         }
 
@@ -125,6 +125,29 @@ fn void_findings(src: &str) -> Vec<Finding> {
     }
 
     out
+}
+
+/// The `>` that ends an open tag, from the byte `i` past its name. The
+/// scan skips a string and a `{ }` value, so the `->` of a handler is no
+/// end. A `<` before the end means the text is no tag.
+fn tag_end(src: &str, mut i: usize) -> Option<usize> {
+    let b = src.as_bytes();
+
+    while i < b.len() {
+        match b[i] {
+            b'>' => return Some(i),
+
+            b'<' => return None,
+
+            b'{' => i = crate::markup::skip_hole(src, i)?,
+
+            b'"' | b'\'' => i = crate::markup::skip_quoted(src, i),
+
+            _ => i += 1,
+        }
+    }
+
+    None
 }
 
 /// The CSS of every `<style>` element of a file, merged, for the editor
@@ -5186,6 +5209,25 @@ assert(__silk_not(false) == true)
             .count();
 
         assert_eq!(voids, 1, "only the `<br>` outside the comment");
+    }
+
+    /// Game bug 118: the `->` of a handler in a `{ }` value is no end of
+    /// a void tag, and neither is a `>` in a string.
+    #[test]
+    fn a_greater_than_in_a_value_does_not_end_a_void_tag() {
+        let src = "import * as vide from './vide'\n\n--- A field whose handler has an arrow in the tag.\nexport function Field() -> Instance\n  return (\n    <input\n      onBlur={function(enter: boolean, _input: InputObject) -> ()\n        print(enter)\n      end}\n    />\n  )\nend\n";
+        assert!(!lints(src).contains(&"void_tag".to_string()));
+
+        // An open tag still reports, and the fix goes at its real end.
+        let src = "return <p><input onBlur={function() -> () end} placeholder=\"a > b\">x</p>\n";
+        let f = run(src, "a.alx", &Options::default())
+            .findings
+            .into_iter()
+            .find(|f| f.lint == "void_tag")
+            .expect("the open `<input>` reports");
+        let end = src.find("\">x").unwrap() + 1;
+
+        assert_eq!(f.span, (10, end as u32 + 1));
     }
 
     const DOCUMENT: &str = "return <html lang=\"en\">\n  <head>\n    <meta charset=\"utf-8\" />\n    <title>Menu &amp; more</title>\n    <meta name=\"display-order\" content=\"10\" />\n    <meta name=\"ignore-inset\" />\n    <meta name=\"reset-on-spawn\" content=\"false\" />\n    <meta name=\"viewport\" content=\"width=1280, height=720, minimum-scale=0.5, maximum-scale=2\" />\n    <style>.card { color: red }</style>\n  </head>\n  <body>\n    <p>Hi</p>\n  </body>\n</html>\n";

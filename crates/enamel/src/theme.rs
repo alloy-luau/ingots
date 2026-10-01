@@ -626,7 +626,8 @@ fn value_end(text: &str, from: usize, to: usize) -> usize {
     to
 }
 
-/// The prelude as one line: comments out, lines joined by a space.
+/// The prelude as one line: comments and `@allow` out, lines joined by a
+/// space.
 fn flatten(text: &str) -> String {
     let mut out = String::new();
     let mut i = 0;
@@ -635,6 +636,16 @@ fn flatten(text: &str) -> String {
     while i < bytes.len() {
         if text[i..].starts_with("--") {
             i = skip_comment(text, i);
+            out.push(' ');
+
+            continue;
+        }
+
+        // `@allow` quiets the lints of the theme file, and a copy needs
+        // none. The compiler also copies a statement behind `@allow`
+        // without its desugar, so `new Font(...)` stays in the Luau.
+        if let Some(end) = allow_end(text, i) {
+            i = end;
             out.push(' ');
 
             continue;
@@ -656,6 +667,16 @@ fn flatten(text: &str) -> String {
     let words: Vec<&str> = out.split_whitespace().collect();
 
     words.join(" ")
+}
+
+/// The end of an `@allow(...)` attribute at `i`, past its `)`.
+fn allow_end(text: &str, i: usize) -> Option<usize> {
+    let args = text[i..]
+        .strip_prefix("@allow")?
+        .trim_start()
+        .strip_prefix('(')?;
+
+    Some(text.len() - args.len() + args.find(')')? + 1)
 }
 
 /// The color a theme expression names, when it is one the reader can
@@ -751,6 +772,22 @@ mod tests {
         );
         assert!(!t.prelude.contains("export"));
         assert_eq!(t.exported.len(), 2);
+    }
+
+    /// Game bug 130: the copy drops `@allow`, so the compiler lowers the
+    /// statement behind it, and `new Font(...)` becomes `Font.new(...)`.
+    #[test]
+    fn the_prelude_drops_allow() {
+        let src = "-- enamel.aly\n@allow(missing_doc)\nexport const fonts = {\n  hud = new Font('rbxasset://fonts/families/PatrickHand.json'),\n}\n";
+        let t = parse(src);
+        assert!(t.problems.is_empty(), "{:?}", t.problems);
+        assert_eq!(
+            t.prelude,
+            "const fonts = { hud = new Font('rbxasset://fonts/families/PatrickHand.json'), }"
+        );
+
+        // A string keeps its text.
+        assert_eq!(flatten("local a = '@allow(x)'"), "local a = '@allow(x)'");
     }
 
     #[test]
