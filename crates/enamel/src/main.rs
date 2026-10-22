@@ -353,6 +353,16 @@ impl Handler for Enamel {
             }
         }
 
+        for (name, span) in markup::find_dynamic(&file.source) {
+            out.push(Finding::new(
+                "dynamic_class",
+                (span.0 as u32, span.1 as u32),
+                format!(
+                    "Enamel reads `{name}` from a string when it compiles, so the classes in this `{{ }}` set nothing; write them out in a string"
+                ),
+            ));
+        }
+
         Ok(out)
     }
 
@@ -563,4 +573,35 @@ impl Handler for Enamel {
 
 fn main() {
     serve(Enamel::new());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// LANG_BUGS 152: Enamel reads classes from a string alone. A class
+    /// list in a hole sets nothing, so it reports. On a component the
+    /// list is a prop, and a string reads as before.
+    #[test]
+    fn a_class_list_in_a_hole_reports() {
+        let file = File {
+            path: "src/card.alx".into(),
+            kind: "alx".into(),
+            source: "export function Card(props: { face: string }) -> Instance\n  return <p className={`text-center {props.face}`}>Hi</p>\nend\n\nexport function Plain() -> Instance\n  return <p className=\"text-center font-bold\">Hi</p>\nend\n\nexport function Box(props: { c: string }) -> Instance\n  return <Frame ClassName={props.c}><Card ClassName={props.c} /></Frame>\nend\n".into(),
+        };
+        let found = Enamel::new().lint(&file).unwrap();
+        let spans: Vec<&str> = found
+            .iter()
+            .map(|f| &file.source[f.span.0 as usize..f.span.1 as usize])
+            .collect();
+
+        assert!(found.iter().all(|f| f.lint == "dynamic_class"), "{found:?}");
+        assert_eq!(
+            spans,
+            [
+                "className={`text-center {props.face}`}",
+                "ClassName={props.c}"
+            ]
+        );
+    }
 }

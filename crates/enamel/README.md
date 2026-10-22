@@ -90,6 +90,11 @@ class parses and the `no_effect` lint says so. A text utility on a
 `Frame` gets `wrong_element`. `ClassName` on a component gets
 `not_an_element`, which fails the build by default.
 
+Enamel reads the classes when it compiles, from a string alone. A class
+list in a `{ }`, such as ``className={`text-center {face}`}``, is a Luau
+value that sets no utility, and the `dynamic_class` lint warns. Write
+each set of classes out in a string, with one element for each set.
+
 In the editor, `ClassName` completes as a prop name on any GUI tag, the
 way a Roblox property does; hover on a class shows what it sets;
 completion lists every utility with a swatch beside each color; and a
