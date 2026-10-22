@@ -78,3 +78,11 @@ assert(y.LayoutOrder == 3000 and x.LayoutOrder == 3001)
 local one = item(7)
 __silk_order(one, 4000)
 assert(one.LayoutOrder == 4000)
+
+-- An element beside a hole sets its own order, and the helper adds the
+-- place to it. A source stays live.
+assert(__silk_order(2, 2000) == 2002)
+local source = __silk_order(function()
+	return 3
+end, 3000)
+assert(source() == 3003)

@@ -134,6 +134,11 @@ gives it:
 </div>
 ```
 
+An element beside a hole that sets its own `LayoutOrder`, as an
+attribute or as CSS `order`, takes its place plus that order too. So in
+`<div className="flex">{left}<span LayoutOrder={2}>a</span>{right}</div>`
+the span stands between the two holes.
+
 A child that places itself stands out of the flow, as `position:
 absolute` does in CSS. It has a `Position` attribute, `position:
 absolute` or `fixed`, an offset such as `top` or `inset`, or an Enamel
