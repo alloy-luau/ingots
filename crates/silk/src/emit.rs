@@ -2365,6 +2365,15 @@ impl<'a> Writer<'a> {
             }
         }
 
+        // When the classes make a UIStroke, Enamel adds their values to
+        // this one, so the element keeps one stroke. The apply mode of
+        // the classes then wins: `stroke-contextual` outlines the text.
+        if replaced.contains("UIStroke") {
+            for (_, props) in m.mods.iter_mut().filter(|(c, _)| *c == "UIStroke") {
+                props.retain(|(k, _)| k != "ApplyStrokeMode");
+            }
+        }
+
         // A live gradient takes its direction from `gradientRotation`, or
         // from an Enamel direction class, `bg-gradient-to-b`. Silk writes
         // the one UIGradient, so the class leaves the list Enamel reads.
@@ -5972,6 +5981,25 @@ assert(__silk_not(false) == true)
 
         assert!(
             out.contains("<Frame Size={UDim2.fromScale(0.25, 1)}"),
+            "{out}"
+        );
+    }
+
+    /// LANG_BUGS 135: when the classes make the UIStroke, a live
+    /// `borderTransparency` writes no apply mode. Enamel adds the values
+    /// of the classes, their mode too, to the same child.
+    #[test]
+    fn a_live_stroke_keeps_the_mode_of_the_classes() {
+        let out = with_enamel(
+            "return <p className=\"stroke-2 stroke-contextual\" style={{ borderTransparency = fade }}>Hi</p>\n",
+        );
+        assert!(out.contains("<UIStroke Transparency={fade} />"), "{out}");
+
+        let out = silk("return <p style={{ borderTransparency = fade }}>Hi</p>\n");
+        assert!(
+            out.contains(
+                "<UIStroke Transparency={fade} ApplyStrokeMode={Enum.ApplyStrokeMode.Border} />"
+            ),
             "{out}"
         );
     }

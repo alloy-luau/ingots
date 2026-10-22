@@ -28,6 +28,11 @@ a one-line component calls `Instance.new` for each child that the
 classes add. Vide types its factory over 19 classes, so a factory
 call for a `UIPadding` or a `UIStroke` fails the type check.
 
+When the element already holds a child of the class, the classes add
+their values to it and write no second one. A value that the child sets
+wins. So a UIStroke that Silk writes for a live `borderTransparency`
+takes the color, the width, and the mode of the stroke classes.
+
 ## What maps
 
 | Classes | Roblox |

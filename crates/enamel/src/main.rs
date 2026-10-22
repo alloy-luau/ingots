@@ -225,7 +225,7 @@ impl Handler for Enamel {
             lead.push_str(&emit::helper_text(&self.helper));
         }
 
-        if self.table && plans.iter().any(emit::Plan::adds_children) {
+        if self.table && plans.iter().any(|p| p.adds_children(&file.source)) {
             lead.push_str(&emit::child_text(&self.helper));
         }
 

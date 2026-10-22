@@ -59,7 +59,10 @@ Silk follows React where React and HTML differ:
   alpha of a border apart from its color. The name is Roblox's, and
   the value is the Roblox value, so a source of any library passes to
   the stroke as it is, with no helper to invert it. Enamel's
-  `stroke-transparency-*` uses the same word.
+  `stroke-transparency-*` uses the same word. When Enamel classes make
+  the stroke, the element keeps one UIStroke, in the mode of the
+  classes: `className="stroke-2 stroke-contextual"` with
+  `style={{ borderTransparency = fade }}` fades the outline of the text.
 - A live gradient is Luau: `backgroundGradient` takes a ColorSequence
   or a source of one, and `gradientTransparency` a NumberSequence or a
   source of one. The direction is static: `gradientRotation` in
