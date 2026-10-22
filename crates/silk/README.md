@@ -156,6 +156,14 @@ children:
 </div>
 ```
 
+Silk cannot see where the children of a hole stand. So a box whose
+children all come through a hole keeps its list, as `<ul>{items}</ul>`
+and `<main>{children}</main>` need. For children that place themselves
+at run time, such as motes that each set a `Position`, the Enamel class
+`layout-none` turns the layout off:
+`<div className="absolute inset-0 layout-none">{motes}</div>`. Without
+Enamel, a Roblox `<Frame>` holds them with no layout.
+
 A child of a flex or a grid box is an item of its own, as CSS makes it:
 `<div className="flex"><span>L</span><span>R</span></div>` is a Frame
 with two TextLabels in a row. An inline tag with a class keeps its own
@@ -358,7 +366,9 @@ class: `<div className="w-full">` keeps its automatic height as
 
 `appearance-none` drops the browser's look of a control, as
 `appearance: none` does, so `<button className="appearance-none">` is a
-bare TextButton that the other classes style.
+bare TextButton that the other classes style. `layout-none` makes Silk
+write no layout for the children of a box, for children that place
+themselves at run time.
 
 An overflow class makes the box a ScrollingFrame, as `overflow: auto`
 does: `overflow-y-auto` scrolls down, `overflow-x-auto` sideways, and

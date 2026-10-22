@@ -27,6 +27,9 @@ pub const SIZE_Y: &str = "size:y";
 pub const APPEARANCE: &str = "look:plain";
 /// `absolute` and `fixed`: the element places itself, out of the flow.
 pub const PLACED: &str = "position:placed";
+/// `layout-none`: Silk writes no layout for the children, which place
+/// themselves at run time.
+pub const NO_LAYOUT: &str = "flow:none";
 /// `w-auto`: the X axis of `AutomaticSize`, which starts at 0.
 pub const AUTO_X: &str = "auto:x";
 pub const AUTO_Y: &str = "auto:y";
@@ -299,6 +302,7 @@ fn utility(base: &str) -> &'static [&'static str] {
         "center" => &["Position", "AnchorPoint"],
         "absolute" | "fixed" => &[PLACED],
         "appearance-none" => &[APPEARANCE],
+        "layout-none" => &[NO_LAYOUT],
         _ => &[],
     };
 

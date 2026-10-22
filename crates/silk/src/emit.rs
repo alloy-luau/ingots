@@ -2781,6 +2781,10 @@ impl<'a> Writer<'a> {
             ))
         } else if flow
             && !enamel_layout
+            // Silk cannot see where the children of a hole stand, so
+            // `layout-none` turns the layout off for children that place
+            // themselves at run time.
+            && !replaced.contains(crate::enamel::NO_LAYOUT)
             && layout_kind != Some(Layout::None)
             && !(placed && matches!(layout_kind, None | Some(Layout::Flow)))
             && (!e.children.is_empty())
@@ -6066,5 +6070,25 @@ assert(__silk_not(false) == true)
         // With no hole, an order stays as written.
         let out = vide("return <div><p>a</p><p LayoutOrder={2}>b</p></div>\n");
         assert!(out.contains("LayoutOrder={2}"), "{out}");
+    }
+
+    /// LANG_BUGS 150: Silk cannot see where the children of a hole stand.
+    /// A box of holes keeps its list, as `<ul>{items}</ul>` needs, and
+    /// `layout-none` turns the list off for children that place
+    /// themselves.
+    #[test]
+    fn layout_none_turns_the_layout_off() {
+        let out =
+            with_enamel("return <div className=\"relative size-[32px]\">{body}{shine}</div>\n");
+        assert!(out.contains("UIListLayout"), "{out}");
+
+        let out = with_enamel(
+            "return <div className=\"relative size-[32px] layout-none\">{body}{shine}</div>\n",
+        );
+        assert!(!out.contains("UIListLayout"), "{out}");
+        assert!(out.contains("{__silk_order(body, 1000)}"), "{out}");
+
+        let out = with_enamel("return <ul className=\"layout-none\"><li>a</li></ul>\n");
+        assert!(!out.contains("UIListLayout"), "{out}");
     }
 }

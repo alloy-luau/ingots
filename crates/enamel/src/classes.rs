@@ -892,6 +892,10 @@ fn parse_depth(class: &Class, ctx: &Context, depth: usize) -> Option<Utility> {
             Vec::new(),
             "Silk drops the look a browser gives a control; nothing to set",
         )),
+        "layout-none" => Some(utility(
+            Vec::new(),
+            "Silk writes no layout for the children of a box; nothing to set",
+        )),
         "absolute" | "relative" | "fixed" | "static" | "sticky" => Some(utility(
             Vec::new(),
             "positions are always absolute on Roblox; nothing to set",
@@ -3004,6 +3008,7 @@ pub fn catalog(ctx: &Context) -> Vec<Entry> {
         "overflow-x-auto",
         "overflow-y-auto",
         "appearance-none",
+        "layout-none",
         "scrollbar-none",
         "truncate",
         "text-clip",
@@ -3341,11 +3346,14 @@ mod tests {
         assert!(!takes_a_number("justify-c"));
     }
 
-    /// Silk reads `appearance-none` and the sideways overflow, so Enamel
-    /// knows them and reports no problem.
+    /// Silk reads `appearance-none`, `layout-none`, and the sideways
+    /// overflow, so Enamel knows them and reports no problem.
     #[test]
     fn the_classes_silk_reads_are_known() {
         let r = resolved("TextButton", "appearance-none");
+        assert!(r.problems.is_empty() && r.props.is_empty(), "{r:?}");
+
+        let r = resolved("Frame", "layout-none");
         assert!(r.problems.is_empty() && r.props.is_empty(), "{r:?}");
 
         let r = resolved("ScrollingFrame", "overflow-x-auto");

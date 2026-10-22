@@ -52,7 +52,7 @@ takes the color, the width, and the mode of the stroke classes.
 | `min-w-*`, `max-w-*`, `aspect-*` | `UISizeConstraint`, `UIAspectRatioConstraint` |
 | `object-cover`, `object-contain` | `ScaleType` |
 | `overflow-hidden`, `overflow-auto`, `overflow-y-auto`, `overflow-x-auto`, `scrollbar-*` | `ClipsDescendants`, `ScrollingEnabled`, `ScrollBarThickness`; on a Silk box, a ScrollingFrame |
-| `appearance-none` | nothing on a Roblox class; on a Silk control, no browser look |
+| `appearance-none`, `layout-none` | nothing on a Roblox class; on a Silk control, no browser look, and on a Silk box, no layout |
 | `hover:`, `active:`, `focus:`, `group`, `group-hover:` | the state helper |
 | `transition`, `transition-colors`, `duration-300`, `duration-[0.3s]`, `ease-out`, `ease-back-in`, `delay-100` | a TweenService tween on each state change |
 | `w-[200px]`, `bg-[#ff0000]`, `text-[14px]` | arbitrary values |
