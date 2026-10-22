@@ -28,6 +28,11 @@ a one-line component calls `Instance.new` for each child that the
 classes add. Vide types its factory over 19 classes, so a factory
 call for a `UIPadding` or a `UIStroke` fails the type check.
 
+When the element already holds a child of the class, the classes add
+their values to it and write no second one. A value that the child sets
+wins. So a UIStroke that Silk writes for a live `borderTransparency`
+takes the color, the width, and the mode of the stroke classes.
+
 ## What maps
 
 | Classes | Roblox |
@@ -47,7 +52,7 @@ call for a `UIPadding` or a `UIStroke` fails the type check.
 | `min-w-*`, `max-w-*`, `aspect-*` | `UISizeConstraint`, `UIAspectRatioConstraint` |
 | `object-cover`, `object-contain` | `ScaleType` |
 | `overflow-hidden`, `overflow-auto`, `overflow-y-auto`, `overflow-x-auto`, `scrollbar-*` | `ClipsDescendants`, `ScrollingEnabled`, `ScrollBarThickness`; on a Silk box, a ScrollingFrame |
-| `appearance-none` | nothing on a Roblox class; on a Silk control, no browser look |
+| `appearance-none`, `layout-none` | nothing on a Roblox class; on a Silk control, no browser look, and on a Silk box, no layout |
 | `hover:`, `active:`, `focus:`, `group`, `group-hover:` | the state helper |
 | `transition`, `transition-colors`, `duration-300`, `duration-[0.3s]`, `ease-out`, `ease-back-in`, `delay-100` | a TweenService tween on each state change |
 | `w-[200px]`, `bg-[#ff0000]`, `text-[14px]` | arbitrary values |
@@ -84,6 +89,11 @@ A margin, a shadow, or a cursor has no property on a GuiObject: the
 class parses and the `no_effect` lint says so. A text utility on a
 `Frame` gets `wrong_element`. `ClassName` on a component gets
 `not_an_element`, which fails the build by default.
+
+Enamel reads the classes when it compiles, from a string alone. A class
+list in a `{ }`, such as ``className={`text-center {face}`}``, is a Luau
+value that sets no utility, and the `dynamic_class` lint warns. Write
+each set of classes out in a string, with one element for each set.
 
 In the editor, `ClassName` completes as a prop name on any GUI tag, the
 way a Roblox property does; hover on a class shows what it sets;

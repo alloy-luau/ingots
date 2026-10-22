@@ -156,6 +156,51 @@ fn find_named(source: &str, attr_name: &str) -> Vec<Found> {
     out
 }
 
+/// Each class list in a `{ }` hole, which Enamel cannot read when it
+/// compiles: `ClassName={...}` on a Roblox GUI element, and the class
+/// list of an HTML element. It gives the name and the span of each
+/// attribute.
+pub fn find_dynamic(source: &str) -> Vec<(&'static str, (usize, usize))> {
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+
+    for name in ["ClassName", "className", "class"] {
+        let key = format!("{name}={{");
+        let mut from = 0;
+
+        while let Some(i) = source[from..].find(&key) {
+            let at = from + i;
+            from = at + 1;
+
+            if at == 0 || !bytes[at - 1].is_ascii_whitespace() {
+                continue;
+            }
+
+            let Some(start) = tag_start(source, at) else {
+                continue;
+            };
+            let name_end = start
+                + 1
+                + source[start + 1..]
+                    .bytes()
+                    .take_while(|b| is_name_byte(*b))
+                    .count();
+            let tag = &source[start + 1..name_end];
+            let html = tag.starts_with(|c: char| c.is_ascii_lowercase());
+
+            // On a component the list is a prop, which it can pass on.
+            if html || (name == "ClassName" && crate::classes::Element::parse(tag).is_some()) {
+                let end = skip_hole(source, at + key.len() - 1);
+                out.push((name, (at, end)));
+            }
+        }
+    }
+
+    out.sort_by_key(|(_, span)| *span);
+
+    out
+}
+
 /// The `<` that opens the tag an attribute at `at` belongs to.
 fn tag_start(source: &str, at: usize) -> Option<usize> {
     let bytes = source.as_bytes();
@@ -436,6 +481,68 @@ fn element_end(source: &str, from: usize) -> Option<usize> {
         }
 
         i += 1;
+    }
+
+    None
+}
+
+/// The direct child of an element that makes an instance of `class`:
+/// `<UIStroke`, or a child component, `<__silk_child Class="UIStroke"`.
+/// It gives the end of the child's attributes, where more go, and the
+/// text of its open tag.
+pub fn child_of_class<'a>(source: &'a str, f: &Found, class: &str) -> Option<(usize, &'a str)> {
+    if f.self_close.is_some() {
+        return None;
+    }
+
+    let bytes = source.as_bytes();
+    let close = source[..f.end].rfind("</")?;
+    let mut i = f.open_end;
+
+    while i < close {
+        if bytes[i] == b'{' {
+            i = skip_hole(source, i);
+
+            continue;
+        }
+
+        if bytes[i] != b'<' {
+            i += 1;
+
+            continue;
+        }
+
+        let name_end = i
+            + 1
+            + source[i + 1..]
+                .bytes()
+                .take_while(|b| is_name_byte(*b))
+                .count();
+
+        // A fragment `<>` holds children; a `<` in text and a comment do not.
+        if name_end == i + 1 && bytes.get(i + 1) != Some(&b'>') {
+            i += 1;
+
+            continue;
+        }
+
+        let (open_end, self_close) = open_tag_end(source, name_end)?;
+        let tag = &source[i..open_end];
+        let name = &source[i + 1..name_end];
+
+        if name == class
+            || (name.ends_with("_child") && tag.contains(&format!("Class=\"{class}\"")))
+        {
+            let attrs = self_close.map_or(open_end - 1, |(s, _)| s);
+
+            return Some((source[..attrs].trim_end().len(), tag));
+        }
+
+        i = match self_close {
+            Some(_) => open_end,
+
+            None => element_end(source, open_end)?,
+        };
     }
 
     None

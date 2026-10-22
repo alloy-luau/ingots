@@ -56,8 +56,13 @@ impl Plan<'_> {
         self.resolved.uses_theme
     }
 
-    pub fn adds_children(&self) -> bool {
-        !self.resolved.children.is_empty()
+    /// Whether the classes write a child of their own, not one that adds
+    /// to a child of the same class in the element.
+    pub fn adds_children(&self, source: &str) -> bool {
+        self.resolved
+            .children
+            .iter()
+            .any(|c| crate::markup::child_of_class(source, self.found, c.class).is_none())
     }
 
     /// Whether the classes set an axis of a `Size` the tag also writes.
@@ -80,28 +85,42 @@ impl Plan<'_> {
             .join(" ")
     }
 
-    /// The children the classes add, as markup. `child` names the
-    /// component of [`child_text`] in the table form: a `<UIPadding>` tag
-    /// would lower to a factory call, and Vide types its factory over 19
-    /// classes, with no UIPadding, UIStroke, or UIScale.
-    fn children(&self, child: Option<&str>) -> String {
-        self.resolved
-            .children
-            .iter()
-            .map(|c| {
-                let props = c
-                    .props
+    /// The children the classes add, as markup, and the edits that add
+    /// their values to a child of the same class that already stands in
+    /// the element. `child` names the component of [`child_text`] in the
+    /// table form: a `<UIPadding>` tag would lower to a factory call, and
+    /// Vide types its factory over 19 classes, with no UIPadding,
+    /// UIStroke, or UIScale.
+    fn children(&self, source: &str, child: Option<&str>) -> (String, Vec<Edit>) {
+        let mut markup = String::new();
+        let mut merges = Vec::new();
+
+        for c in &self.resolved.children {
+            let props = |tag: &str| {
+                c.props
                     .iter()
+                    .filter(|(k, _)| !tag.contains(&format!(" {k}=")))
                     .map(|(k, v)| format!(" {k}={{{v}}}"))
-                    .collect::<String>();
+                    .collect::<String>()
+            };
 
-                match child {
-                    Some(name) => format!("<{name} Class=\"{}\"{props} />", c.class),
+            // Silk writes a live `borderTransparency` as a UIStroke, and an
+            // author can write one too. A second stroke would draw over
+            // it, so the classes set what that child leaves out.
+            if let Some((at, tag)) = crate::markup::child_of_class(source, self.found, c.class) {
+                merges.push(Edit::insert(at as u32, props(tag)));
 
-                    None => format!("<{}{props} />", c.class),
-                }
-            })
-            .collect()
+                continue;
+            }
+
+            markup.push_str(&match child {
+                Some(name) => format!("<{name} Class=\"{}\"{} />", c.class, props("")),
+
+                None => format!("<{}{} />", c.class, props("")),
+            });
+        }
+
+        (markup, merges)
     }
 
     /// The Luau table of the states the helper applies.
@@ -159,7 +178,8 @@ impl Plan<'_> {
         }
 
         let child = format!("{helper}_child");
-        let children = self.children(table.then_some(child.as_str()));
+        let (children, merges) = self.children(source, table.then_some(child.as_str()));
+        edits.extend(merges);
 
         if !children.is_empty() {
             match f.self_close {
@@ -537,5 +557,42 @@ mod tests {
         );
         assert!(out.contains("{{ ref = __enamel(nil, { hover = { BackgroundColor3 = Color3.fromRGB(220, 38, 38) } }, false, nil, __silk(nil, \"x\", nil, nil, nil, nil)) }}"), "{out}");
         assert_eq!(out.matches("ref =").count(), 1, "{out}");
+    }
+
+    /// LANG_BUGS 135: Silk writes a live `borderTransparency` as a
+    /// UIStroke child. The classes add their values to that child, so the
+    /// text keeps one outline, in the mode of the classes.
+    #[test]
+    fn the_classes_fill_the_stroke_that_stands_in_the_element() {
+        let run = |src: &str, table: bool| {
+            let found = markup::find(src);
+
+            apply(
+                src,
+                &plan(&found[0], &Context::default()).edits(src, "__enamel", table, None),
+            )
+        };
+
+        let src = "return <TextLabel ClassName=\"stroke-2 stroke-contextual stroke-black\" Text=\"a\"><__silk_child Class=\"UIStroke\" Transparency={fade} Make={vide.create} /></TextLabel>\n";
+        let out = run(src, true);
+        // No child of its own, so the transform writes no child helper.
+        assert!(!plan(&markup::find(src)[0], &Context::default()).adds_children(src));
+        assert_eq!(out.matches("UIStroke").count(), 1, "{out}");
+        assert!(!out.contains("__enamel_child"), "{out}");
+        assert!(
+            out.contains("<__silk_child Class=\"UIStroke\" Transparency={fade} Make={vide.create} ApplyStrokeMode={Enum.ApplyStrokeMode.Contextual}"),
+            "{out}"
+        );
+        assert!(out.contains("Thickness={2}"), "{out}");
+
+        // A value that the child sets wins over the class.
+        let out = run(
+            "return <Frame ClassName=\"stroke-2 stroke-red-500\">\n  <UIStroke Color={c}>{g}</UIStroke>\n</Frame>\n",
+            false,
+        );
+        assert_eq!(out.matches("<UIStroke").count(), 1, "{out}");
+        assert!(out.contains("<UIStroke Color={c}"), "{out}");
+        assert!(out.contains("Thickness={2}"), "{out}");
+        assert!(!out.contains("239, 68, 68"), "{out}");
     }
 }

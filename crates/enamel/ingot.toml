@@ -24,6 +24,11 @@ default = "warn"
 summary = "a utility with no effect on a Roblox instance"
 detail = "Margins, shadows, cursors, and a few others have no property to set on a GuiObject. The class parses and does nothing; `gap-*` on the parent replaces a margin. A padding, a layout, or a corner behind a state, such as `hover:p-4`, also does nothing. Only a property, a scale, or a stroke changes with a state."
 
+[lints.dynamic_class]
+default = "warn"
+summary = "a class list in a `{ }`, which Enamel cannot read"
+detail = "Enamel turns the classes into properties when it compiles, and it reads them from a string alone. A Luau value, such as a template string or a variable, sets no utility. Write each set of classes out in a string, with one element for each set."
+
 [lints.not_an_element]
 default = "deny"
 summary = "`ClassName` on a component or an unknown tag"

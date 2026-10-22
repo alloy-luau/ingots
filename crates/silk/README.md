@@ -59,7 +59,10 @@ Silk follows React where React and HTML differ:
   alpha of a border apart from its color. The name is Roblox's, and
   the value is the Roblox value, so a source of any library passes to
   the stroke as it is, with no helper to invert it. Enamel's
-  `stroke-transparency-*` uses the same word.
+  `stroke-transparency-*` uses the same word. When Enamel classes make
+  the stroke, the element keeps one UIStroke, in the mode of the
+  classes: `className="stroke-2 stroke-contextual"` with
+  `style={{ borderTransparency = fade }}` fades the outline of the text.
 - A live gradient is Luau: `backgroundGradient` takes a ColorSequence
   or a source of one, and `gradientTransparency` a NumberSequence or a
   source of one. The direction is static: `gradientRotation` in
@@ -131,6 +134,11 @@ gives it:
 </div>
 ```
 
+An element beside a hole that sets its own `LayoutOrder`, as an
+attribute or as CSS `order`, takes its place plus that order too. So in
+`<div className="flex">{left}<span LayoutOrder={2}>a</span>{right}</div>`
+the span stands between the two holes.
+
 A child that places itself stands out of the flow, as `position:
 absolute` does in CSS. It has a `Position` attribute, `position:
 absolute` or `fixed`, an offset such as `top` or `inset`, or an Enamel
@@ -147,6 +155,14 @@ children:
     <main className="center w-[640px] p-6">...</main>
 </div>
 ```
+
+Silk cannot see where the children of a hole stand. So a box whose
+children all come through a hole keeps its list, as `<ul>{items}</ul>`
+and `<main>{children}</main>` need. For children that place themselves
+at run time, such as motes that each set a `Position`, the Enamel class
+`layout-none` turns the layout off:
+`<div className="absolute inset-0 layout-none">{motes}</div>`. Without
+Enamel, a Roblox `<Frame>` holds them with no layout.
 
 A child of a flex or a grid box is an item of its own, as CSS makes it:
 `<div className="flex"><span>L</span><span>R</span></div>` is a Frame
@@ -350,7 +366,9 @@ class: `<div className="w-full">` keeps its automatic height as
 
 `appearance-none` drops the browser's look of a control, as
 `appearance: none` does, so `<button className="appearance-none">` is a
-bare TextButton that the other classes style.
+bare TextButton that the other classes style. `layout-none` makes Silk
+write no layout for the children of a box, for children that place
+themselves at run time.
 
 An overflow class makes the box a ScrollingFrame, as `overflow: auto`
 does: `overflow-y-auto` scrolls down, `overflow-x-auto` sideways, and

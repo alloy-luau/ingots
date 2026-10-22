@@ -179,6 +179,10 @@ struct Writer<'a> {
     covered: Vec<bool>,
     /// The `LayoutOrder` a parent gives each child.
     order: HashMap<usize, usize>,
+    /// The children of a box that holds a hole, in the table form. An
+    /// order such a child sets goes on top of its place, as the order
+    /// of an item in a hole does.
+    on_place: HashSet<usize>,
     /// Elements whose children run in a row: a flex row, or a button
     /// that holds an icon beside its text.
     row_parents: HashSet<usize>,
@@ -252,6 +256,7 @@ impl<'a> Writer<'a> {
             foldable: vec![false; n],
             covered: vec![false; n],
             order: HashMap::new(),
+            on_place: HashSet::new(),
             row_parents: HashSet::new(),
             text_boxes: HashSet::new(),
             uses_rich: false,
@@ -2365,6 +2370,15 @@ impl<'a> Writer<'a> {
             }
         }
 
+        // When the classes make a UIStroke, Enamel adds their values to
+        // this one, so the element keeps one stroke. The apply mode of
+        // the classes then wins: `stroke-contextual` outlines the text.
+        if replaced.contains("UIStroke") {
+            for (_, props) in m.mods.iter_mut().filter(|(c, _)| *c == "UIStroke") {
+                props.retain(|(k, _)| k != "ApplyStrokeMode");
+            }
+        }
+
         // A live gradient takes its direction from `gradientRotation`, or
         // from an Enamel direction class, `bg-gradient-to-b`. Silk writes
         // the one UIGradient, so the class leaves the list Enamel reads.
@@ -2507,10 +2521,18 @@ impl<'a> Writer<'a> {
 
         if let Some(k) = self.order.get(&i).copied()
             && !written.contains("LayoutOrder")
-            && m.get("LayoutOrder").is_none()
             && class != "Sound"
         {
-            m.set("LayoutOrder", k.to_string());
+            match m.get("LayoutOrder").map(str::parse::<i64>) {
+                None => m.set("LayoutOrder", k.to_string()),
+
+                // CSS `order` goes on top of the place, as the attribute does.
+                Some(Ok(own)) if self.on_place.contains(&i) => {
+                    m.set("LayoutOrder", (k as i64 + own).to_string())
+                }
+
+                Some(_) => {}
+            }
         }
 
         // ---- the text
@@ -2686,6 +2708,23 @@ impl<'a> Writer<'a> {
                 match x {
                     Slot::Element(x) => {
                         self.order.insert(x, order);
+
+                        // The items of a hole take their place plus the order
+                        // they set, so an order the element sets takes its
+                        // place too. A React element has no instance for the
+                        // helper to order, so React keeps the number as written.
+                        if step == HOLE_STEP && self.opts.factory.table {
+                            self.on_place.insert(x);
+
+                            if let Some(a) = self.el(x).attr("LayoutOrder")
+                                && let Value::Expr(s, t) = a.value
+                            {
+                                let open = format!("{}_order(", self.opts.helper);
+                                self.insert(s, RANK_ORDER_OPEN, open);
+                                let tail = self.live(&format!("{order})"));
+                                self.insert(t, RANK_ORDER_CLOSE, format!(", {tail}"));
+                            }
+                        }
                     }
 
                     Slot::Run => {
@@ -2742,6 +2781,10 @@ impl<'a> Writer<'a> {
             ))
         } else if flow
             && !enamel_layout
+            // Silk cannot see where the children of a hole stand, so
+            // `layout-none` turns the layout off for children that place
+            // themselves at run time.
+            && !replaced.contains(crate::enamel::NO_LAYOUT)
             && layout_kind != Some(Layout::None)
             && !(placed && matches!(layout_kind, None | Some(Layout::Flow)))
             && (!e.children.is_empty())
@@ -4200,12 +4243,16 @@ return not v end "
 /// item gives, and again each time the item changes it. `own` holds that
 /// order per item, and `false` for an item that gives none. An order of
 /// 1000 or more runs into the next place, as for [`HOLE_STEP`].
+///
+/// A number is the `LayoutOrder` that an element beside the hole sets,
+/// and the helper adds the place to it. A source of a number stays live.
 pub fn order_text(helper: &str) -> String {
     format!(
         "local {helper}_own: {{ [any]: any }} = setmetatable({{}}, {{ __mode = \"k\" }}) :: any \
 local function {helper}_order(v: any, k: number, compute: any?): any \
 if type(v) == \"function\" then local f: any = v return function() return {helper}_order(f(), k) end end \
 if type(v) == \"table\" and compute ~= nil and v.type == \"State\" then local derive: any = compute return derive(function(use: any) return {helper}_order(use(v), k) end) end \
+if type(v) == \"number\" then return k + v end \
 if typeof(v) == \"Instance\" then local g: any = v if g:IsA(\"GuiObject\") then g.LayoutOrder = k end return v end \
 if type(v) ~= \"table\" then return v end \
 for n, c in ipairs(v) do local g: any = c if typeof(c) == \"Instance\" and g:IsA(\"GuiObject\") then \
@@ -5974,5 +6021,74 @@ assert(__silk_not(false) == true)
             out.contains("<Frame Size={UDim2.fromScale(0.25, 1)}"),
             "{out}"
         );
+    }
+
+    /// LANG_BUGS 135: when the classes make the UIStroke, a live
+    /// `borderTransparency` writes no apply mode. Enamel adds the values
+    /// of the classes, their mode too, to the same child.
+    #[test]
+    fn a_live_stroke_keeps_the_mode_of_the_classes() {
+        let out = with_enamel(
+            "return <p className=\"stroke-2 stroke-contextual\" style={{ borderTransparency = fade }}>Hi</p>\n",
+        );
+        assert!(out.contains("<UIStroke Transparency={fade} />"), "{out}");
+
+        let out = silk("return <p style={{ borderTransparency = fade }}>Hi</p>\n");
+        assert!(
+            out.contains(
+                "<UIStroke Transparency={fade} ApplyStrokeMode={Enum.ApplyStrokeMode.Border} />"
+            ),
+            "{out}"
+        );
+    }
+
+    /// LANG_BUGS 146: in a box that holds a hole, the order that an
+    /// element sets goes on top of its place, as the order of an item in
+    /// the hole does. So the span stands between the two holes.
+    #[test]
+    fn an_order_beside_a_hole_takes_its_place() {
+        let src =
+            "return <div className=\"flex\">{left}<span LayoutOrder={2}>a</span>{right}</div>\n";
+        let table = Options {
+            enamel: true,
+            ..vide_opts()
+        };
+        let out = apply(src, &run(src, "a.alx", &table).edits);
+        assert!(out.contains("LayoutOrder={__silk_order(2, 2000)}"), "{out}");
+        assert!(out.contains("{__silk_order(right, 3000)}"), "{out}");
+
+        // React has no instance to order, so it keeps the order as written.
+        let out = with_enamel(src);
+        assert!(out.contains("LayoutOrder={2}"), "{out}");
+
+        // A Roblox element and the CSS `order` take their place too.
+        let out = vide("return <div>{left}<Frame LayoutOrder={n} /></div>\n");
+        assert!(out.contains("LayoutOrder={__silk_order(n, 2000)}"), "{out}");
+        let out = vide("return <div>{left}<p style={{ order = 2 }}>a</p></div>\n");
+        assert!(out.contains("LayoutOrder={2002}"), "{out}");
+
+        // With no hole, an order stays as written.
+        let out = vide("return <div><p>a</p><p LayoutOrder={2}>b</p></div>\n");
+        assert!(out.contains("LayoutOrder={2}"), "{out}");
+    }
+
+    /// LANG_BUGS 150: Silk cannot see where the children of a hole stand.
+    /// A box of holes keeps its list, as `<ul>{items}</ul>` needs, and
+    /// `layout-none` turns the list off for children that place
+    /// themselves.
+    #[test]
+    fn layout_none_turns_the_layout_off() {
+        let out =
+            with_enamel("return <div className=\"relative size-[32px]\">{body}{shine}</div>\n");
+        assert!(out.contains("UIListLayout"), "{out}");
+
+        let out = with_enamel(
+            "return <div className=\"relative size-[32px] layout-none\">{body}{shine}</div>\n",
+        );
+        assert!(!out.contains("UIListLayout"), "{out}");
+        assert!(out.contains("{__silk_order(body, 1000)}"), "{out}");
+
+        let out = with_enamel("return <ul className=\"layout-none\"><li>a</li></ul>\n");
+        assert!(!out.contains("UIListLayout"), "{out}");
     }
 }
