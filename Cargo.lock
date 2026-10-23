@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "alloy-ingot"
-version = "0.1.0-rc.11"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -12,7 +12,7 @@ dependencies = [
 
 [[package]]
 name = "enamel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "alloy-ingot",
  "serde",
@@ -94,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "silk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "alloy-ingot",
  "serde",
