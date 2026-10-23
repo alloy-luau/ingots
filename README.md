@@ -26,7 +26,7 @@ alloy ingot install
 
 The command fetches the zip for your machine from the latest release
 into `.alloy/ingots`, and `.alloy/ingots.lock` records the version.
-`version = "0.1.0"` in the table pins one release. `alloy ingot update`
+`version = "0.2.0"` in the table pins one release. `alloy ingot update`
 moves an unpinned ingot to the latest release.
 
 A `.config.aly` project writes the same table in Alloy:
