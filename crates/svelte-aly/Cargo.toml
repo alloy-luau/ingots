@@ -1,0 +1,15 @@
+[package]
+name = "svelte-aly"
+version = "0.3.0"
+description = "Svelte's runes and blocks for Alloy: $state, $derived, $effect, <script>, {#if}, and {#each}, compiled to the svelte-aly package"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+alloy-ingot.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

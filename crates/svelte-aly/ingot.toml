@@ -1,0 +1,63 @@
+name = "svelte-aly"
+api = 1
+description = "Svelte's runes and blocks: `$state`, `$derived`, `$effect`, `$props`, `{#if}`, and `{#each}`, compiled to the svelte-aly package."
+binary = "../../target/release/svelte-aly"
+# Before Silk (-200), so Silk reads the markup after this ingot made each
+# `{#if}` and `{#each}` a hole.
+run = -300
+kinds = ["aly", "alx"]
+hooks = ["transform", "lint", "hover", "complete"]
+
+[options]
+import = { default = "@packages/svelte-aly", doc = "The module path of the svelte-aly package, as the project imports it." }
+helper = { default = "__svelte", doc = "The name the rewrite gives the package in each file. Change it when it collides with a name of yours." }
+
+# The runes. The transform rewrites each one, so the compiler never
+# reads them; the editor lists them after `$` with the intrinsics.
+[macros]
+state = { doc = "A value that changes: `let count = $state(0)`. Read and write `count` as a plain name; each change runs the effects and the markup that read it. A table runs them when you assign it again.", insert = "state(${1:value})" }
+derived = { doc = "A value that other values give: `let doubled = $derived(count * 2)`. It runs again only after a value that it reads changes, and code cannot write it.", insert = "derived(${1:expression})" }
+"derived.by" = { doc = "A derived value from a function, for one that needs statements: `let total = $derived.by(function() ... end)`.", insert = "derived.by(function()\n\treturn $0\nend)" }
+effect = { doc = "Runs a function now, and again each time a value that it reads changes. A function that it gives back runs before the next run and when the effect stops.", insert = "effect(function()\n\t$0\nend)" }
+"effect.pre" = { doc = "The same as `$effect`. svelte-aly runs every effect at the write, so the two do not differ.", insert = "effect.pre(function()\n\t$0\nend)" }
+props = { doc = "The props that the parent gives a component: `let { title, count } = $props()`. Each name reads the value now, so a prop that the parent binds to a state follows it. Only in the `<script>` of a component file.", insert = "props()" }
+
+[lints.shadowed_rune]
+default = "deny"
+summary = "a second binding with the name of a rune"
+detail = "The rewrite reads every use of a rune's name as the rune: a state, a derived value, or a prop. A parameter, a loop variable, or a local with the same name would read as the rune too. Give it another name."
+
+[lints.derived_write]
+default = "deny"
+summary = "a write to a `$derived` value"
+detail = "A derived value comes from the values it reads. Write the state that it reads, or make it a `$state`."
+
+[lints.mutation]
+default = "warn"
+summary = "a change in place to the table of a state"
+detail = "`items:push(x)` and `table.insert(items, x)` change the table and tell no one, so no effect runs. Assign the state again after the change, `items = items`, or assign a new table: `items = items:concat([ x ])`."
+
+[lints.props_outside_script]
+default = "deny"
+summary = "`$props()` outside a component file"
+detail = "`$props()` reads the props that a parent gives a component, so it belongs in the `<script>` of a `.alx` file that starts with one."
+
+[lints.bad_each]
+default = "deny"
+summary = "an `{#each}` the ingot cannot read"
+detail = "Write `{#each items as item}`, `{#each items as item, i}`, or `{#each items as item (key)}`. The item is one name; a destructure goes inside the block."
+
+[lints.unclosed_block]
+default = "deny"
+summary = "a block with no close, or a close with no block"
+detail = "Each `{#if}` ends with `{/if}` and each `{#each}` with `{/each}`. `{:else if}` and `{:else}` stand inside an open block."
+
+[lints.unsupported_block]
+default = "deny"
+summary = "a Svelte block that svelte-aly does not compile"
+detail = "svelte-aly compiles `{#if}`, `{:else if}`, `{:else}`, and `{#each}`. `{#await}`, `{#key}`, `{#snippet}`, `{@html}`, `{@const}`, and `{@render}` have no form yet."
+
+[lints.style_needs_silk]
+default = "warn"
+summary = "a `<style>` in a project without Silk"
+detail = "Roblox has no CSS. The Silk ingot turns `<style>` into a StyleSheet; without it, the rewrite drops the element. Add Silk to `[ingots]`."

@@ -9,6 +9,7 @@ crate under `crates/` is one ingot.
 | --- | --- |
 | [`enamel`](crates/enamel) | Utility classes on `.alx` elements: `ClassName="flex gap-2 bg-red-500 rounded-lg"` becomes Roblox properties and layout children. Tailwind's names, Roblox's values. |
 | [`silk`](crates/silk) | HTML and CSS in `.alx`, the React way: `<div>`, `<p>`, and `<button>` become Roblox instances, attributes become properties, and `<style>` becomes a StyleSheet. |
+| [`svelte-aly`](crates/svelte-aly) | Svelte's syntax for the [svelte-aly](https://github.com/alloy-luau/packages/tree/main/svelte-aly) package: `$state`, `$derived`, `$effect`, `$props`, `{#if}`, and `{#each}`. |
 
 ## Install
 
@@ -18,6 +19,7 @@ Name an ingot by this repository, then install it:
 [ingots]
 enamel = { repo = "alloy-luau/ingots" }
 silk = { repo = "alloy-luau/ingots" }
+svelte-aly = { repo = "alloy-luau/ingots" }
 ```
 
 ```sh
@@ -26,7 +28,7 @@ alloy ingot install
 
 The command fetches the zip for your machine from the latest release
 into `.alloy/ingots`, and `.alloy/ingots.lock` records the version.
-`version = "0.2.0"` in the table pins one release. `alloy ingot update`
+`version = "0.3.0"` in the table pins one release. `alloy ingot update`
 moves an unpinned ingot to the latest release.
 
 A `.config.aly` project writes the same table in Alloy:
@@ -35,6 +37,7 @@ A `.config.aly` project writes the same table in Alloy:
 ingots = {
   enamel = { repo = 'alloy-luau/ingots' },
   silk = { repo = 'alloy-luau/ingots' },
+  ['svelte-aly'] = { repo = 'alloy-luau/ingots' },
 },
 ```
 
@@ -54,6 +57,7 @@ A project names a local build by the directory that holds its
 [ingots]
 enamel = "../ingots/crates/enamel"
 silk = "../ingots/crates/silk"
+svelte-aly = "../ingots/crates/svelte-aly"
 ```
 
 ## Release
