@@ -6,7 +6,7 @@ binary = "../../target/release/svelte-aly"
 # `{#if}` and `{#each}` a hole.
 run = -300
 kinds = ["aly", "alx"]
-hooks = ["transform", "lint", "hover", "complete"]
+hooks = ["transform", "lint", "hover", "complete", "tokens"]
 
 [options]
 import = { default = "@packages/svelte-aly", doc = "The module path of the svelte-aly package, as the project imports it." }

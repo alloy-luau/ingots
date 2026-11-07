@@ -1,11 +1,12 @@
-//! The editor side of the ingot: a hover on each block tag, and the
-//! block tags as snippets after `{#`, `{:`, and `{/`. The runes need
-//! nothing here: the manifest declares them under `[macros]`, so the
-//! host lists and explains them as it does the intrinsics.
+//! The editor side of the ingot: a hover on each block tag, the block
+//! tags as snippets after `{#`, `{:`, and `{/`, and their colors as
+//! semantic tokens. The runes need nothing here: the manifest declares
+//! them under `[macros]`, so the host lists, explains, and colors them as
+//! it does the intrinsics.
 
-use alloy_ingot::{CompletionItem, Completions, Hover, ItemKind};
+use alloy_ingot::{CompletionItem, Completions, Hover, ItemKind, Token, TokenType};
 
-use crate::scan::{self, Tag};
+use crate::scan::{self, Kind, Tag};
 
 /// What each block tag does, for its hover.
 fn tag_doc(tag: &Tag) -> Option<(&'static str, &'static str)> {
@@ -119,9 +120,68 @@ pub fn complete(src: &str, offset: usize) -> Completions {
     Completions::new(items)
 }
 
+/// A keyword token over the sigil and the words of each block tag, and
+/// over the `as` of an `{#each}`. The braces and the expressions keep the
+/// host's colors.
+pub fn tokens(src: &str) -> Vec<Token> {
+    let s = scan::scan(src, true);
+    let keyword = |a: usize, b: usize| Token::new((a as u32, b as u32), TokenType::Keyword);
+    let mut out = Vec::new();
+
+    for b in &s.blocks {
+        let words_end = b
+            .head
+            .map_or(b.end.saturating_sub(1), |r| s.regions[r].start);
+        let Some(words) = src.get(b.start + 1..words_end) else {
+            continue;
+        };
+        let words = words.trim_end();
+
+        if !words.is_empty() {
+            out.push(keyword(b.start + 1, b.start + 1 + words.len()));
+        }
+
+        // The last `as` outside brackets, as the rewrite cuts the head.
+        if let (Tag::Each, Some(r)) = (&b.tag, b.head) {
+            let mut depth = 0i32;
+            let mut cut = None;
+
+            for t in &s.regions[r].toks {
+                match &src[t.start..t.end] {
+                    "(" | "{" | "[" => depth += 1,
+                    ")" | "}" | "]" => depth -= 1,
+                    "as" if depth == 0 && t.kind == Kind::Name => cut = Some(t),
+                    _ => {}
+                }
+            }
+
+            if let Some(t) = cut {
+                out.push(keyword(t.start, t.end));
+            }
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_tags_color_their_words_and_the_as_of_each() {
+        let src = "<Frame>\n{#if ready}\n{:else if count > 2}\n{:else}\n{/if}\n{#each items as item, i (item.id)}\n{/each}\n</Frame>\n";
+        let words: Vec<&str> = tokens(src)
+            .iter()
+            .map(|t| &src[t.span.0 as usize..t.span.1 as usize])
+            .collect();
+
+        assert_eq!(
+            words,
+            ["#if", ":else if", ":else", "/if", "#each", "as", "/each"]
+        );
+        assert!(tokens(src).iter().all(|t| t.kind == TokenType::Keyword));
+    }
 
     #[test]
     fn a_block_tag_hovers_and_its_head_does_not() {

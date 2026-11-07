@@ -1,6 +1,6 @@
 //! The svelte-aly ingot: the protocol side of the library.
 
-use alloy_ingot::{Completions, Edit, File, Finding, Handler, Hover, Settings, serve};
+use alloy_ingot::{Completions, Edit, File, Finding, Handler, Hover, Settings, Token, serve};
 use svelte_aly::editor;
 use svelte_aly::rewrite::{self, Options};
 
@@ -67,6 +67,14 @@ impl Handler for Svelte {
         }
 
         Ok(editor::hover(&file.source, offset as usize))
+    }
+
+    fn tokens(&mut self, file: &File) -> Result<Vec<Token>, String> {
+        if file.kind != "alx" {
+            return Ok(Vec::new());
+        }
+
+        Ok(editor::tokens(&file.source))
     }
 
     fn complete(
