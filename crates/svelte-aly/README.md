@@ -23,8 +23,9 @@ as Svelte does.
 
 ## Install
 
-The ingot needs Alloy 0.1.7 or later. An older compiler rejects the
-`[macros]` table of its manifest, and it cannot read `<script>`.
+The ingot needs Alloy 0.1.8 or later. An older compiler rejects its
+manifest: 0.1.7 has no `tokens` hook, and 0.1.6 cannot read `[macros]` or
+`<script>`.
 
 Install the package as its README says, then name the ingot in `alloy.toml`
 and run `alloy ingot install`:
@@ -72,8 +73,11 @@ what it does. The compiler itself knows none of them.
 - A rune reads as its value to the type check: `items:` completes the
   methods of the list, and the item of an `{#each}` takes the type of the
   list's items.
-- The Alloy extension colours `<script>` as Alloy, each rune as a macro, and
-  the sigil and word of each block tag as a keyword.
+- The ingot colours the sigil and the words of each block tag, and the `as`
+  of an `{#each}`, as keywords. It sends them as semantic tokens, so any
+  editor that reads them shows the colours, and the grammar needs no rule.
+- The Alloy extension colours `<script>` as Alloy, and the host colours each
+  rune as a macro.
 
 ## Options
 

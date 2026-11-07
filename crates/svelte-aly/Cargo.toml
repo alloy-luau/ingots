@@ -1,6 +1,6 @@
 [package]
 name = "svelte-aly"
-version = "0.3.0"
+version = "0.4.0"
 description = "Svelte's runes and blocks for Alloy: $state, $derived, $effect, <script>, {#if}, and {#each}, compiled to the svelte-aly package"
 edition.workspace = true
 rust-version.workspace = true

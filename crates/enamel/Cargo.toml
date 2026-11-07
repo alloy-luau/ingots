@@ -1,6 +1,6 @@
 [package]
 name = "enamel"
-version = "0.3.0"
+version = "0.4.0"
 description = "Utility classes for Alloy markup: Tailwind's names, Roblox properties"
 edition.workspace = true
 rust-version.workspace = true
